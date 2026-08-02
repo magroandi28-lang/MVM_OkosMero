@@ -50,6 +50,41 @@ FLUX_SZEREP = (
 )
 
 
+# Zárómondatok: nincs bennük élő adat, ezért mindig kimennek —
+# a Gemini-változat végére is. Ezek hívják körbe a látogatót az oldalon.
+# A modellek bemutatása. Ezek NEM élő adatok, hanem a dokumentált,
+# offline validált eredmények — ezért fix szövegek, nem a Gemini írja.
+MODELL_UZENETEK = [
+    {"sor": "Az OkosMérő két külön módszert használ: a CatBoost előrejelzi a várható "
+            "fogyasztást, az STL pedig megkeresi a szokatlan eltéréseket.",
+     "szam": None, "cimke": None},
+    {"sor": "A CatBoost egy gépi tanulási modell: korábbi villamosenergia-adatokból "
+            "tanulta meg, hogy különböző körülmények között általában hogyan változik "
+            "az ország fogyasztása.",
+     "szam": None, "cimke": None},
+    {"sor": "Az STL azt vizsgálja, hogy a ténylegesen bekövetkezett fogyasztás mennyire "
+            "tér el a megszokott mintától.",
+     "szam": None, "cimke": None},
+    {"sor": "A két módszer együtt nemcsak előrejelzést ad, hanem segít felismerni, "
+            "amikor az energiarendszer viselkedése valamilyen okból szokatlanná válik.",
+     "szam": None, "cimke": None},
+]
+
+
+ZARO_UZENETEK = [
+    {"sor": "Nézz körül nyugodtan: a DAM-árak és töltés fülön negyedórás "
+            "bontásban látod a másnapi árakat és az ajánlott töltési ablakokat.",
+     "szam": None, "cimke": None},
+    {"sor": "Az Energiaelemzés fülön a következő órák fogyasztási előrejelzése, "
+            "a Megújulókon a nap- és széltermelés terve és tényleges alakulása várja.",
+     "szam": None, "cimke": None},
+    {"sor": "Az ML Modell Labor pedig élőben mutatja a két modellt: a CatBoost "
+            "gépi tanulási modell órákra előre becsli a fogyasztást, az STL-módszer "
+            "pedig a szokásostól eltérő órákat találja meg és keresi rájuk a magyarázatot.",
+     "szam": None, "cimke": None},
+]
+
+
 # ============================================================
 # 1) TÉNYEK — az app `data` store-jából
 # ============================================================
@@ -137,10 +172,17 @@ def tenyek(data, ajanlas=None):
     if lezart:
         f["modell_pontossag"] = {
             "nap": lezart["nap"],
-            "catboost_mae_mwh": _kerekit(lezart["cb"], 1),
+            # A frissített jóslat már ismeri a legutóbbi mért órákat, ezért a
+            # MAVIR napra előre készült előrejelzésével NEM ez az összemérhető.
+            "catboost_frissitett_mae_mwh": _kerekit(lezart["cb"], 1),
+            # Az ELSŐ jóslat készül a leghosszabb horizonton — ez a korrekt
+            # összevetés a MAVIR day-ahead előrejelzésével.
+            "catboost_elso_jóslat_mae_mwh": _kerekit(lezart.get("first"), 1),
             "mavir_mae_mwh": _kerekit(lezart["mv"], 1),
             "orak_szama": lezart["orak"],
-            "megjegyzes": "lezárt nap, mindkét előrejelzés ugyanazokra az órákra",
+            "megjegyzes": ("A frissített jóslat ismeri a legutóbbi mért órákat, "
+                           "ezért a MAVIR-ral az ELSŐ, hosszabb horizontú jóslat "
+                           "hasonlítható össze korrektül."),
         }
 
     naplo = val.get("naplo") or []
@@ -367,16 +409,22 @@ def sablon_uzenetek(f):
         })
 
     m = f.get("modell_pontossag")
-    if m and m.get("catboost_mae_mwh") is not None and m.get("mavir_mae_mwh") is not None:
-        jobb = m["catboost_mae_mwh"] < m["mavir_mae_mwh"]
+    elso = (m or {}).get("catboost_elso_jóslat_mae_mwh")
+    if m and elso is not None and m.get("mavir_mae_mwh") is not None:
         u.append({
-            "sor": (f"A legutóbbi lezárt napon a saját modellünk átlagos hibája "
-                    f"{m['catboost_mae_mwh']:.0f} MWh volt, a hivatalos MAVIR-előrejelzésé "
-                    f"{m['mavir_mae_mwh']:.0f} MWh — "
-                    f"{'a miénk volt pontosabb' if jobb else 'a MAVIR volt pontosabb'}."),
-            "szam": f"{m['catboost_mae_mwh']:.0f} MWh",
-            "cimke": "CatBoost átlagos hibája · lezárt nap",
+            "sor": (f"A legutóbbi lezárt napon a modell egy nappal előre készült jóslata "
+                    f"átlagosan {elso:.0f} MWh-val tért el a tényleges fogyasztástól."),
+            "szam": f"{elso:.0f} MWh",
+            "cimke": "átlagos eltérés · nap előre készült jóslat",
         })
+        if m.get("catboost_frissitett_mae_mwh") is not None:
+            u.append({
+                "sor": (f"Ahogy megérkeznek a mért órák, a modell újraszámol: a frissített "
+                        f"jóslat ugyanezen a napon már csak {m['catboost_frissitett_mae_mwh']:.0f} "
+                        f"MWh-val tért el a tényadattól."),
+                "szam": f"{m['catboost_frissitett_mae_mwh']:.0f} MWh",
+                "cimke": "frissített jóslat átlagos hibája",
+            })
 
     a = f.get("adatminoseg")
     if a:
@@ -541,7 +589,7 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
         return [{"sor": "Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
                  "szam": None, "cimke": None}]
 
-    tartalek = sablon_uzenetek(f)
+    tartalek = sablon_uzenetek(f) + MODELL_UZENETEK + ZARO_UZENETEK
     if koszonto:
         tartalek[0] = {"sor": koszonto, "szam": None, "cimke": None}
 
@@ -594,13 +642,16 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
             "nyitott kérdésről.\n"
             "A 'modell_pontossag' MINDIG egy LEZÁRT napra vonatkozik: úgy fogalmazz, "
             "hogy 'a legutóbbi lezárt napon', és soha ne írd, hogy 'ma'. "
-            "A két előrejelzést csak egymás mellett, ugyanarra a napra említsd.\n"
+            "A MAVIR-előrejelzést NE hasonlítsd össze a mi modellünkkel és ne állítsd, "
+            "hogy bármelyik pontosabb — az összevetés módszertani validálása még "
+            "folyamatban van. Csak a saját modell eltéréséről beszélj.\n"
             "Ne írj olyan számot, ami nincs a JSON-ban."
         )
         valasz = _gemini(prompt, _UZENET_SEMA)
         jo, hibak = _ellenoriz(valasz.get("uzenetek", []), f)
         if len(jo) >= 2:
-            vegleges = ([{"sor": koszonto, "szam": None, "cimke": None}] if koszonto else []) + jo
+            vegleges = (([{"sor": koszonto, "szam": None, "cimke": None}] if koszonto else [])
+                        + jo + MODELL_UZENETEK + ZARO_UZENETEK)
             allapot, model_nev = "gemini", GEMINI_MODEL
         else:
             allapot = "rejected"
