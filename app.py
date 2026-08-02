@@ -1240,11 +1240,13 @@ HEADER = html.Header([
 NAV_TABS = html.Div([
     html.Div("Főoldal",id="nav-fooldal",n_clicks=0,
         style={"color":C['gr'],"borderBottom":f"2px solid {C['gr']}"},className="nav-tab"),
+    html.Div("DAM-árak és töltés",id="nav-toltes",n_clicks=0,
+        style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab"),
     html.Div("Energiaelemzés",id="nav-elemzes",n_clicks=0,
         style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab"),
-    html.Div("ML Modell Labor",id="nav-mllabor",n_clicks=0,
-        style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab"),
     html.Div("Megújulók",id="nav-megujulok",n_clicks=0,
+        style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab"),
+    html.Div("ML Modell Labor",id="nav-mllabor",n_clicks=0,
         style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab")
 ],className="nav-tabs-row")
 
@@ -1449,7 +1451,8 @@ def fetch(n,_manual):
         "hianyzo":hianyzo}
 
 @callback(Output("oldal","data"),
-    [Input(f"nav-{x}","n_clicks") for x in ["fooldal","elemzes","mllabor","megujulok"]],
+    [Input(f"nav-{x}","n_clicks")
+     for x in ["fooldal","toltes","elemzes","megujulok","mllabor"]],
     prevent_initial_call=True)
 def nav(*_):
     ctx=dash.callback_context
@@ -1483,13 +1486,14 @@ NB = {"display":"flex","alignItems":"center","justifyContent":"center",
 @callback([Output("statusz","children"),Output("kpi-sor","children"),
     Output("oldal-content","children"),Output("src-panel","children"),
     Output("modell-panel","children"),
-    Output("nav-fooldal","style"),Output("nav-elemzes","style"),Output("nav-mllabor","style"),
-    Output("nav-megujulok","style")],
+    Output("nav-fooldal","style"),Output("nav-toltes","style"),
+    Output("nav-elemzes","style"),Output("nav-megujulok","style"),
+    Output("nav-mllabor","style")],
     [Input("adatok","data"),Input("oldal","data"),Input("clock","n_intervals")])
 def render(data,oldal,_clock):
     ns=[{**NB,"color":C['gr'],"borderBottom":f"2px solid {C['gr']}"} if oldal==x
         else {**NB,"color":C['mut'],"borderBottom":"2px solid transparent"}
-        for x in ["fooldal","elemzes","mllabor","megujulok"]]
+        for x in ["fooldal","toltes","elemzes","megujulok","mllabor"]]
 
     mk = (bundle or {}).get("metrikak",{})
     modell_info = html.Div([
@@ -1599,6 +1603,8 @@ def render(data,oldal,_clock):
     ],className="kpi-grid", style=KPI_GRID_STYLE)
 
     if oldal=="fooldal":
+        page=nyitooldal()
+    elif oldal=="toltes":
         page=fooldal(data,aj)
     elif oldal=="elemzes":
         page=elemzes(edf,data)
@@ -1609,7 +1615,16 @@ def render(data,oldal,_clock):
     return statusz,ksor,page,src,modell_info,*ns
 
 # ============================================================
-# FŐOLDAL — hero-kártya: "Mikor tölts?"
+# ÚJ FŐOLDAL — nyitó vizuál (a KPI-sort és a fejlécet a layout rajzolja)
+# ============================================================
+def nyitooldal():
+    return html.Div([
+        html.Img(src="/assets/hero-grid.png",
+                 alt="Villamosenergia-hálózat", className="hero-kep")
+    ], className="hero-panel")
+
+# ============================================================
+# DAM-ÁRAK ÉS TÖLTÉS — hero-kártya: "Mikor tölts?"
 # ============================================================
 def fooldal(data,aj):
     if not aj:
