@@ -1440,3 +1440,32 @@ body {
   background-size: 100% auto;
   background-position: center bottom;
 }
+
+
+/* ============================================================
+   ÚJ FŐOLDAL — nyitó vizuál + 5 fül
+   ============================================================ */
+
+.nav-tabs-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.hero-panel {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid #1a2d42;
+  border-radius: 8px;
+  background: #071529;
+}
+
+.hero-kep {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+@media (max-width: 700px) {
+  .nav-tabs-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
