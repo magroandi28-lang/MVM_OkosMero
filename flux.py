@@ -292,108 +292,127 @@ def _ido(iso):
 
 
 def sablon_uzenetek(f):
-    """Kitalálás nélküli, számokból összerakott megállapítások."""
+    """Kitalálás nélküli megállapítások. A mondat önmagában is érthető:
+    a szám benne van a szövegben, a kiemelt érték csak megismétli."""
     u = [{"sor": KOSZONTO, "szam": None, "cimke": None}]
 
     t = f.get("toltes")
     if t and t.get("ajanlott_ar_eur_mwh") is not None:
+        mikor = _ido(t["ajanlott_kezdet"])
         u.append({
-            "sor": "A következő kedvező töltési ablak már megvan — ekkor a legolcsóbb az áram.",
+            "sor": (f"A legkedvezőbb töltési idő {mikor} és {_ido(t['ajanlott_veg'])} "
+                    f"között van, {t['ajanlott_ar_eur_mwh']:.0f} €/MWh áron."),
             "szam": f"{t['ajanlott_ar_eur_mwh']:.0f} €/MWh",
-            "cimke": f"{_ido(t['ajanlott_kezdet'])} – {_ido(t['ajanlott_veg'])} · ajánlott ablak",
+            "cimke": "ajánlott töltési ablak ára",
         })
+
+    k = f.get("kartyak") or {}
+    d = f.get("dam")
+    if k.get("jelenlegi_dam_ar_eur_mwh") is not None and d:
+        most = k["jelenlegi_dam_ar_eur_mwh"]
+        atl = d.get("mai_atlag_eur_mwh")
+        if atl:
+            irany = "olcsóbb" if most < atl else "drágább"
+            u.append({
+                "sor": (f"Az áram most {most:.0f} €/MWh, ez {irany}, mint a mai "
+                        f"{atl:.0f} €/MWh-s napi átlag."),
+                "szam": f"{most:.0f} €/MWh",
+                "cimke": "jelenlegi day-ahead ár",
+            })
 
     fo = f.get("fogyasztas")
     if fo and fo.get("elorejelzett_csucs_mwh"):
-        elteres = fo.get("elteres_heti_atlagtol_mwh")
-        sor = "A mai csúcsterhelést a CatBoost erre az órára várja."
-        szaz = fo.get("elteres_heti_atlagtol_szazalek")
-        if szaz is not None:
-            sor = (f"A következő órák fogyasztása a heti átlag fölött marad."
-                   if szaz > 0 else
-                   f"A következő órák fogyasztása a heti átlag alatt marad.")
-        elif elteres is not None:
-            sor = ("A mai csúcs magasabb lesz a heti átlagnál." if elteres > 0
-                   else "A mai csúcs a heti átlag alatt marad.")
+        csucs = f"{fo['elorejelzett_csucs_mwh']:,.0f}".replace(",", " ")
         u.append({
-            "sor": sor,
-            "szam": f"{fo['elorejelzett_csucs_mwh']:,.0f} MWh".replace(",", " "),
-            "cimke": f"{_ido(fo['csucs_idopont'])} · előrejelzett csúcs",
+            "sor": (f"A következő órák csúcsterhelését {_ido(fo['csucs_idopont'])} "
+                    f"órára várjuk, {csucs} MWh körül."),
+            "szam": f"{csucs} MWh",
+            "cimke": "előrejelzett csúcsterhelés",
+        })
+
+    if fo and fo.get("elteres_heti_atlagtol_szazalek") is not None:
+        sz = fo["elteres_heti_atlagtol_szazalek"]
+        u.append({
+            "sor": (f"A következő órák fogyasztása {abs(sz):.1f} százalékkal "
+                    f"{'magasabb' if sz > 0 else 'alacsonyabb'}, mint a heti átlag "
+                    f"ugyanezekben az órákban."),
+            "szam": f"{sz:+.1f}%",
+            "cimke": "eltérés a heti átlagtól",
+        })
+
+    if k.get("budapest_homerseklet_c") is not None:
+        u.append({
+            "sor": (f"Budapesten most {k['budapest_homerseklet_c']:.0f} °C van — "
+                    f"a meleg a hűtésen keresztül azonnal megjelenik a fogyasztásban."),
+            "szam": f"{k['budapest_homerseklet_c']:.0f} °C",
+            "cimke": "mért hőmérséklet · Budapest",
+        })
+
+    mg = f.get("megujulok")
+    if mg and mg.get("nap_meg_varhato_novekedes_mw"):
+        no = f"{mg['nap_meg_varhato_novekedes_mw']:,.0f}".replace(",", " ")
+        cs = f"{mg['nap_varhato_csucs_mw']:,.0f}".replace(",", " ")
+        u.append({
+            "sor": (f"A napelemes termelés ma még {no} MW-tal emelkedhet, "
+                    f"a várható csúcs {cs} MW."),
+            "szam": f"{cs} MW",
+            "cimke": "mai várható napenergia-csúcs",
+        })
+    elif mg and mg.get("nap_varhato_csucs_mw"):
+        cs = f"{mg['nap_varhato_csucs_mw']:,.0f}".replace(",", " ")
+        u.append({
+            "sor": f"A napelemek mai várható csúcstermelése {cs} MW a rendszerben.",
+            "szam": f"{cs} MW",
+            "cimke": "mai várható napenergia-csúcs",
         })
 
     m = f.get("modell_pontossag")
     if m and m.get("catboost_mae_mwh") is not None and m.get("mavir_mae_mwh") is not None:
         jobb = m["catboost_mae_mwh"] < m["mavir_mae_mwh"]
         u.append({
-            "sor": ("A legutóbbi lezárt napon a CatBoost pontosabb volt a hivatalos "
-                    "MAVIR-előrejelzésnél." if jobb else
-                    "A legutóbbi lezárt napon a MAVIR-előrejelzés volt a pontosabb."),
-            "szam": f"{m['catboost_mae_mwh']:.0f} vs {m['mavir_mae_mwh']:.0f} MWh",
-            "cimke": f"átlagos hiba · lezárt nap ({m['orak_szama']} óra)",
-        })
-
-    k = f.get("kartyak") or {}
-    if k.get("budapest_homerseklet_c") is not None and f.get("dam"):
-        u.append({
-            "sor": "Budapesten most ennyi van — a meleg a hűtésen keresztül azonnal "
-                   "megjelenik a fogyasztásban.",
-            "szam": f"{k['budapest_homerseklet_c']:.0f} °C",
-            "cimke": "Budapest · most",
-        })
-
-    if fo and fo.get("elteres_heti_atlagtol_szazalek") is not None:
-        sz = fo["elteres_heti_atlagtol_szazalek"]
-        u.append({
-            "sor": ("Ennyivel tér el a következő órák várható fogyasztása a heti "
-                    "átlagtól ugyanezekre az órákra."),
-            "szam": f"{sz:+.1f}%",
-            "cimke": "eltérés a heti átlagtól",
-        })
-
-    mg = f.get("megujulok")
-    if mg and mg.get("nap_meg_varhato_novekedes_mw"):
-        u.append({
-            "sor": "A napelemes termelés még ennyivel nőhet a mai eddigi csúcshoz képest.",
-            "szam": f"+{mg['nap_meg_varhato_novekedes_mw']:,.0f} MW".replace(",", " "),
-            "cimke": "mai várható napenergia-csúcsig",
-        })
-    elif mg and mg.get("nap_varhato_csucs_mw"):
-        u.append({
-            "sor": "A napelemek mai várható csúcstermelése ennyi lesz a rendszerben.",
-            "szam": f"{mg['nap_varhato_csucs_mw']:,.0f} MW".replace(",", " "),
-            "cimke": "várható napenergia-csúcs",
+            "sor": (f"A legutóbbi lezárt napon a saját modellünk átlagos hibája "
+                    f"{m['catboost_mae_mwh']:.0f} MWh volt, a hivatalos MAVIR-előrejelzésé "
+                    f"{m['mavir_mae_mwh']:.0f} MWh — "
+                    f"{'a miénk volt pontosabb' if jobb else 'a MAVIR volt pontosabb'}."),
+            "szam": f"{m['catboost_mae_mwh']:.0f} MWh",
+            "cimke": "CatBoost átlagos hibája · lezárt nap",
         })
 
     a = f.get("adatminoseg")
     if a:
-        # Azt mondjuk el, AMI KIDERÜLT, nem azt, hogy mit kell megvizsgálni.
-        if a["extrem_idojaras_db"] >= max(a["alacsony_napsugarzas_db"],
-                                          a["homersekleti_fordulat_db"], 1):
+        extrem = a["extrem_idojaras_db"]
+        borult = a["alacsony_napsugarzas_db"]
+        fordulat = a["homersekleti_fordulat_db"]
+        if extrem and extrem >= borult and extrem >= fordulat:
             u.append({
-                "sor": "A héten a szokatlan fogyasztási órák többségét a szélsőséges "
-                       "időjárás magyarázza — hőségben ugrik meg a hűtés.",
-                "szam": f"{a['extrem_idojaras_db']} óra",
-                "cimke": "extrém időjárás · elmúlt 7 nap",
+                "sor": (f"Az elmúlt héten {extrem} olyan óra volt, amikor a fogyasztás "
+                        f"a szokásostól eltért, és ezt a szélsőséges időjárás magyarázza: "
+                        f"hőségben megnő a hűtés áramigénye."),
+                "szam": f"{extrem} óra",
+                "cimke": "szélsőséges időjárás · elmúlt 7 nap",
             })
-        elif a["alacsony_napsugarzas_db"] >= a["homersekleti_fordulat_db"]:
+        elif borult and borult >= fordulat:
             u.append({
-                "sor": "Borult órákon a napelemek kevesebbet adtak, ezért nőtt a "
-                       "hálózatból vett fogyasztás.",
-                "szam": f"{a['alacsony_napsugarzas_db']} óra",
+                "sor": (f"Az elmúlt héten {borult} órában a borult idő miatt kevesebb "
+                        f"napelemes termelés jutott a rendszerbe, ezért nőtt a hálózatból "
+                        f"vett fogyasztás."),
+                "szam": f"{borult} óra",
                 "cimke": "alacsony napsugárzás · elmúlt 7 nap",
             })
-        elif a["homersekleti_fordulat_db"] > 0:
+        elif fordulat:
             u.append({
-                "sor": "Egy nap alatti nagy hőmérséklet-fordulat mozgatta meg a "
-                       "fogyasztást a héten.",
-                "szam": f"{a['homersekleti_fordulat_db']} óra",
+                "sor": (f"Az elmúlt héten {fordulat} órát magyaráz a napon belüli nagy "
+                        f"hőmérséklet-változás — a hirtelen fordulat átrendezi a fogyasztást."),
+                "szam": f"{fordulat} óra",
                 "cimke": "hőmérsékleti fordulat · elmúlt 7 nap",
             })
         else:
             u.append({
-                "sor": "A héten minden szokatlan órára megvan a magyarázat.",
+                "sor": (f"Az elmúlt hét {a['jelzes_7_nap']} szokatlan órájából "
+                        f"{a['megmagyarazva']} kapott magyarázatot az időjárási és "
+                        f"piaci adatok alapján."),
                 "szam": f"{a['megmagyarazva']} / {a['jelzes_7_nap']}",
-                "cimke": "megmagyarázott jelzés · 7 nap",
+                "cimke": "megmagyarázott óra · elmúlt 7 nap",
             })
 
     return u
@@ -553,9 +572,11 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
             "Az alábbi JSON a magyar villamosenergia-rendszer élő adatait tartalmazza.\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
             "Készíts 4-5 megállapítást a főoldalra. Minden megállapítás:\n"
-            "- 'sor': EGY rövid, tegező mondat (max 110 karakter),\n"
+            "- 'sor': EGY tegező mondat (max 160 karakter), amely ÖNMAGÁBAN is érthető: "
+            "a számot ÍRD BELE a mondatba, ne csak utalj rá ('ennyivel', 'ennyi' TILOS),\n"
             "- 'szam': egyetlen kiemelt érték mértékegységgel, pontosan az adatokból,\n"
-            "- 'cimke': 2-5 szavas kontextus (időpont, forrás).\n"
+            "- 'cimke': 2-5 szavas kontextus, ami megmondja, MI az a szám "
+            "(pl. 'előrejelzett csúcsterhelés'), soha ne önmagában álló mértékegység.\n"
             "Használhatod a 'kartyak' értékeit is — ezeket a látogató a fejléc alatt látja.\n"
             "Témák: töltési ablak és ár; a mai fogyasztási csúcs és eltérése; "
             "a CatBoost és a MAVIR pontossága; nyitott adatminőségi jelzések.\n"

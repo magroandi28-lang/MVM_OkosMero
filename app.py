@@ -1267,6 +1267,9 @@ app.layout = html.Div([
         dcc.Interval(id="clock",interval=15*1000,n_intervals=0),
         dcc.Store(id="oldal",data="fooldal"),
         dcc.Store(id="adatok",data=None),
+        dcc.Store(id="flux-uzenetek",data=None),
+        dcc.Store(id="flux-valasz",data=None),
+        dcc.Store(id="flux-noop",data=None),
     ],className="app-main")
 ],className="app-shell")
 
@@ -1606,7 +1609,9 @@ def render(data,oldal,_clock):
     ],className="kpi-grid", style=KPI_GRID_STYLE)
 
     if oldal=="fooldal":
-        page=nyitooldal()
+        # A 15 mp-es óra NE építse újra a nyitóoldalt: az újraépítés
+        # nullázná a Flux gépelését és visszaugrana a köszöntőre.
+        page = dash.no_update if dash.ctx.triggered_id == "clock" else nyitooldal()
     elif oldal=="toltes":
         page=fooldal(data,aj)
     elif oldal=="elemzes":
@@ -1646,9 +1651,6 @@ def nyitooldal():
         dcc.Input(id="flux-kerdes",type="text",debounce=False,
                   placeholder="Kérdezz Fluxtól…",className="flux-kerdes"),
 
-        dcc.Store(id="flux-uzenetek",data=None),
-        dcc.Store(id="flux-valasz",data=None),
-        dcc.Interval(id="flux-tick",interval=55,n_intervals=0),
     ],className="flux-reteg")
 
     return html.Div([
@@ -1695,44 +1697,19 @@ def flux_kerdes(_n, kerdes, data):
                 "szam":None,"cimke":None}, ""
 
 
-# ---- Flux: gépelés a böngészőben (55 ms/karakter ≈ 18 karakter/mp) ----
+# ---- Flux: az adatok átadása a böngészőnek ----
+# A gépelést az assets/flux.js végzi saját ütemben. Így az oldal újraépítése
+# (15 mp-es óra, fülváltás) nem szakítja meg és nem kezdi elölről a szöveget.
 app.clientside_callback(
     """
-    function(n, uzenetek, valasz) {
-        const st = window._flux = window._flux || {i:0, k:0, t:0, valaszKulcs:null, valaszAktiv:false};
-        let lista = uzenetek || [];
-        if (valasz) {
-            const vk = JSON.stringify(valasz);
-            if (st.valaszKulcs !== vk) {
-                st.valaszKulcs = vk; st.valaszAktiv = true; st.i = 0; st.k = 0; st.t = 0;
-            }
-        }
-        if (st.valaszAktiv && valasz) lista = [valasz].concat(uzenetek || []);
-        if (!lista.length) return ["", "", "", {display:"none"}];
-        if (st.i >= lista.length) st.i = 0;
-
-        const uz = lista[st.i] || {};
-        const sor = uz.sor || "";
-        if (st.k < sor.length) { st.k += 1; st.t = 0; }
-        else {
-            st.t += 1;
-            if (st.t > 145) {                       // ~8 másodperc
-                st.t = 0; st.k = 0;
-                if (st.valaszAktiv) { st.valaszAktiv = false; st.i = 0; }
-                else { st.i = (st.i + 1) % lista.length; }
-            }
-        }
-        const kesz = st.k >= sor.length;
-        const szam = kesz ? (uz.szam || "") : "";
-        const cimke = kesz ? (uz.cimke || "") : "";
-        return [sor.slice(0, st.k), szam, cimke,
-                {display: szam ? "flex" : "none", flexDirection:"column", gap:"4px"}];
+    function(uzenetek, valasz) {
+        window.FLUX_DATA = {uzenetek: uzenetek || [], valasz: valasz || null};
+        if (window.fluxIndit) window.fluxIndit();
+        return window.dash_clientside.no_update;
     }
     """,
-    [Output("flux-szoveg","children"),Output("flux-szam","children"),
-     Output("flux-cimke","children"),Output("flux-szam-doboz","style")],
-    Input("flux-tick","n_intervals"),
-    [State("flux-uzenetek","data"),State("flux-valasz","data")],
+    Output("flux-noop","data"),
+    [Input("flux-uzenetek","data"),Input("flux-valasz","data")],
 )
 
 # ============================================================
