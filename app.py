@@ -1,5 +1,5 @@
 import dash
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -21,6 +21,8 @@ try:
 except ImportError:
     psycopg = None
 load_dotenv()
+
+import flux
 
 app = dash.Dash(__name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
@@ -1248,7 +1250,8 @@ NAV_TABS = html.Div([
         style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab"),
     html.Div("ML Modell Labor",id="nav-mllabor",n_clicks=0,
         style={"color":C['mut'],"borderBottom":"2px solid transparent"},className="nav-tab")
-],className="nav-tabs-row")
+],className="nav-tabs-row",
+   style={"display":"grid","gridTemplateColumns":"repeat(5, minmax(0, 1fr))"})
 
 app.layout = html.Div([
     HEADER,
@@ -1618,10 +1621,119 @@ def render(data,oldal,_clock):
 # ÚJ FŐOLDAL — nyitó vizuál (a KPI-sort és a fejlécet a layout rajzolja)
 # ============================================================
 def nyitooldal():
+    """Nyitó vizuál + Flux. A szöveg keret nélkül, az égbolt előtt jelenik meg."""
+    flux_reteg = html.Div([
+        html.Div([
+            html.Div(style={"width":"5px","height":"5px","borderRadius":"999px",
+                            "background":C['gr'],"boxShadow":f"0 0 8px {_rgba(C['gr'],.8)}"}),
+            html.Div("FLUX",style={"color":"#5b7a92","fontSize":"10px","fontWeight":"700",
+                                   "letterSpacing":"3px"})
+        ],style={"display":"flex","alignItems":"center","gap":"7px"}),
+
+        html.Div([
+            html.Span(id="flux-szoveg"),
+            html.Span(className="flux-kurzor")
+        ],style={"minHeight":"84px","color":"#dbe7f2","fontSize":"15px","lineHeight":"1.7",
+                 "textWrap":"pretty"}),
+
+        html.Div([
+            html.Div(id="flux-szam",style={"color":C['wh'],"fontSize":"34px",
+                                           "fontWeight":"700","lineHeight":"1"}),
+            html.Div(id="flux-cimke",style={"color":C['mut'],"fontSize":"10px","fontWeight":"600",
+                                            "letterSpacing":"1.4px","textTransform":"uppercase"})
+        ],id="flux-szam-doboz",style={"display":"none","flexDirection":"column","gap":"4px"}),
+
+        dcc.Input(id="flux-kerdes",type="text",debounce=False,
+                  placeholder="Kérdezz Fluxtól…",className="flux-kerdes"),
+
+        dcc.Store(id="flux-uzenetek",data=None),
+        dcc.Store(id="flux-valasz",data=None),
+        dcc.Interval(id="flux-tick",interval=55,n_intervals=0),
+    ],className="flux-reteg")
+
     return html.Div([
-        html.Img(src="/assets/hero-grid.png",
-                 alt="Villamosenergia-hálózat", className="hero-kep")
-    ], className="hero-panel")
+        html.Img(src=dash.get_asset_url("hero-grid.png"),
+                 alt="Villamosenergia-hálózat", className="hero-kep",
+                 style={"display":"block","width":"100%","height":"auto"}),
+        flux_reteg
+    ], className="hero-panel",
+       style={"position":"relative","width":"100%","overflow":"hidden",
+              "border":f"1px solid {C['brd']}","borderRadius":"8px",
+              "background":"#071529","minHeight":"120px"})
+
+
+# ---- Flux: szövegek az élő adatokból (Gemini a szerveren, flux.py) ----
+@callback(Output("flux-uzenetek","data"),
+    Input("adatok","data"),
+    prevent_initial_call=False)
+def flux_szovegek(data):
+    if not data or data.get("kritikus_hiba"):
+        return [{"sor":"Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
+                 "szam":None,"cimke":None}]
+    try:
+        aj = toltes_ajanlas(data["negyed"]) if data.get("negyed") else None
+        return flux.uzenetek(data, aj)
+    except Exception as e:
+        print(f"[FLUX] Szövegek: {e}", flush=True)
+        return [{"sor":flux.KOSZONTO,"szam":None,"cimke":None}]
+
+
+# ---- Flux: a látogató kérdése ----
+@callback([Output("flux-valasz","data"),Output("flux-kerdes","value")],
+    Input("flux-kerdes","n_submit"),
+    [State("flux-kerdes","value"),State("adatok","data")],
+    prevent_initial_call=True)
+def flux_kerdes(_n, kerdes, data):
+    if not kerdes or not str(kerdes).strip():
+        return dash.no_update, dash.no_update
+    try:
+        aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
+        return flux.valasz(kerdes, data, aj), ""
+    except Exception as e:
+        print(f"[FLUX] Kérdés callback: {e}", flush=True)
+        return {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
+                "szam":None,"cimke":None}, ""
+
+
+# ---- Flux: gépelés a böngészőben (55 ms/karakter ≈ 18 karakter/mp) ----
+app.clientside_callback(
+    """
+    function(n, uzenetek, valasz) {
+        const st = window._flux = window._flux || {i:0, k:0, t:0, valaszKulcs:null, valaszAktiv:false};
+        let lista = uzenetek || [];
+        if (valasz) {
+            const vk = JSON.stringify(valasz);
+            if (st.valaszKulcs !== vk) {
+                st.valaszKulcs = vk; st.valaszAktiv = true; st.i = 0; st.k = 0; st.t = 0;
+            }
+        }
+        if (st.valaszAktiv && valasz) lista = [valasz].concat(uzenetek || []);
+        if (!lista.length) return ["", "", "", {display:"none"}];
+        if (st.i >= lista.length) st.i = 0;
+
+        const uz = lista[st.i] || {};
+        const sor = uz.sor || "";
+        if (st.k < sor.length) { st.k += 1; st.t = 0; }
+        else {
+            st.t += 1;
+            if (st.t > 145) {                       // ~8 másodperc
+                st.t = 0; st.k = 0;
+                if (st.valaszAktiv) { st.valaszAktiv = false; st.i = 0; }
+                else { st.i = (st.i + 1) % lista.length; }
+            }
+        }
+        const kesz = st.k >= sor.length;
+        const szam = kesz ? (uz.szam || "") : "";
+        const cimke = kesz ? (uz.cimke || "") : "";
+        return [sor.slice(0, st.k), szam, cimke,
+                {display: szam ? "flex" : "none", flexDirection:"column", gap:"4px"}];
+    }
+    """,
+    [Output("flux-szoveg","children"),Output("flux-szam","children"),
+     Output("flux-cimke","children"),Output("flux-szam-doboz","style")],
+    Input("flux-tick","n_intervals"),
+    [State("flux-uzenetek","data"),State("flux-valasz","data")],
+)
 
 # ============================================================
 # DAM-ÁRAK ÉS TÖLTÉS — hero-kártya: "Mikor tölts?"
