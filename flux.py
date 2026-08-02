@@ -11,6 +11,7 @@ sablon szolgál helyette — kitalált szám sosem jelenik meg.
 """
 
 import os
+import re
 import json
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -113,6 +114,15 @@ def tenyek(data, ajanlas=None):
                 f["fogyasztas"]["elteres_heti_atlagtol_mwh"] = _kerekit(
                     csucs["fogyasztas"] - heti[ora])
 
+    # Eltérések — ezekből lesz a "mennyivel több / kevesebb" mondat.
+    heti = data.get("heti_atlag")
+    if heti and eredm:
+        atl = sum(heti) / len(heti)
+        vart = sum(r["fogyasztas"] for r in eredm) / len(eredm)
+        f.setdefault("fogyasztas", {})["elteres_heti_atlagtol_szazalek"] = _kerekit(
+            (vart - atl) / atl * 100, 1) if atl else None
+        f["fogyasztas"]["heti_atlag_mwh"] = _kerekit(atl)
+
     mert = data.get("mert_fogyasztas")
     if mert:
         f["mert_fogyasztas"] = {"ertek_mwh": _kerekit(mert["ertek"]),
@@ -146,6 +156,14 @@ def tenyek(data, ajanlas=None):
             f["megujulok"]["nap_mai_mae_mw"] = _kerekit(meg["hiba_nap"]["mae"])
         if (meg.get("hiba_szel") or {}).get("mae") is not None:
             f["megujulok"]["szel_mai_mae_mw"] = _kerekit(meg["hiba_szel"]["mae"])
+        mert_nap = [x for x in (meg.get("tny_nap") or []) if x is not None]
+        if mert_nap:
+            f["megujulok"]["nap_eddigi_csucs_mw"] = _kerekit(max(mert_nap))
+            f["megujulok"]["nap_meg_varhato_novekedes_mw"] = _kerekit(
+                max(0.0, max(meg["fc_nap"]) - max(mert_nap)))
+        mert_szel = [x for x in (meg.get("tny_szel") or []) if x is not None]
+        if mert_szel:
+            f["megujulok"]["szel_eddigi_csucs_mw"] = _kerekit(max(mert_szel))
 
     hianyzo = data.get("hianyzo") or []
     minoseg = "complete" if not hianyzo else "partial"
@@ -238,10 +256,17 @@ def _summary_ment(snapshot_id, cache_key, model_name, allapot, szoveg, hibak):
 # ============================================================
 
 def _ido(iso):
+    """Óra:perc, elé 'holnap' vagy dátum, ha nem a mai napra esik."""
     try:
-        return datetime.fromisoformat(iso).strftime("%H:%M")
+        t = datetime.fromisoformat(iso)
     except Exception:
         return ""
+    ma = datetime.now().date()
+    if t.date() == ma:
+        return t.strftime("%H:%M")
+    if (t.date() - ma).days == 1:
+        return f"holnap {t:%H:%M}"
+    return t.strftime("%m.%d. %H:%M")
 
 
 def sablon_uzenetek(f):
@@ -260,7 +285,12 @@ def sablon_uzenetek(f):
     if fo and fo.get("elorejelzett_csucs_mwh"):
         elteres = fo.get("elteres_heti_atlagtol_mwh")
         sor = "A mai csúcsterhelést a CatBoost erre az órára várja."
-        if elteres is not None:
+        szaz = fo.get("elteres_heti_atlagtol_szazalek")
+        if szaz is not None:
+            sor = (f"A következő órák fogyasztása a heti átlag fölött marad."
+                   if szaz > 0 else
+                   f"A következő órák fogyasztása a heti átlag alatt marad.")
+        elif elteres is not None:
             sor = ("A mai csúcs magasabb lesz a heti átlagnál." if elteres > 0
                    else "A mai csúcs a heti átlag alatt marad.")
         u.append({
@@ -287,8 +317,23 @@ def sablon_uzenetek(f):
             "cimke": "Budapest · most",
         })
 
+    if fo and fo.get("elteres_heti_atlagtol_szazalek") is not None:
+        sz = fo["elteres_heti_atlagtol_szazalek"]
+        u.append({
+            "sor": ("Ennyivel tér el a következő órák várható fogyasztása a heti "
+                    "átlagtól ugyanezekre az órákra."),
+            "szam": f"{sz:+.1f}%",
+            "cimke": "eltérés a heti átlagtól",
+        })
+
     mg = f.get("megujulok")
-    if mg and mg.get("nap_varhato_csucs_mw"):
+    if mg and mg.get("nap_meg_varhato_novekedes_mw"):
+        u.append({
+            "sor": "A napelemes termelés még ennyivel nőhet a mai eddigi csúcshoz képest.",
+            "szam": f"+{mg['nap_meg_varhato_novekedes_mw']:,.0f} MW".replace(",", " "),
+            "cimke": "mai várható napenergia-csúcsig",
+        })
+    elif mg and mg.get("nap_varhato_csucs_mw"):
         u.append({
             "sor": "A napelemek mai várható csúcstermelése ennyi lesz a rendszerben.",
             "szam": f"{mg['nap_varhato_csucs_mw']:,.0f} MW".replace(",", " "),
@@ -355,22 +400,22 @@ _UZENET_SEMA = {
 }
 
 
+_IDO_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\b")
+_DATUM_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\.\s?\d{1,2}\.")
+_EZRES_RE = re.compile(r"(?<=\d)[\s\u00a0\u202f](?=\d)")
+_SZAM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
 def _szamok(szoveg):
-    """A szövegben szereplő számok — az ellenőrzéshez."""
-    jel, akt = [], ""
-    for ch in str(szoveg):
-        if ch.isdigit() or ch in ",.":
-            akt += ch.replace(",", ".")
-        else:
-            if akt:
-                jel.append(akt)
-            akt = ""
-    if akt:
-        jel.append(akt)
+    """A szövegben szereplő számok. Az időpontok és dátumok nem számítanak
+    adatnak — azok az ISO mezőkből származnak, nem a modell találta ki őket."""
+    s = _DATUM_RE.sub(" ", str(szoveg))
+    s = _IDO_RE.sub(" ", s)
+    s = _EZRES_RE.sub("", s)          # "4 695" -> "4695"
     ki = set()
-    for s in jel:
+    for m in _SZAM_RE.finditer(s):
         try:
-            ki.add(round(float(s.strip(".")), 1))
+            ki.add(float(m.group().replace(",", ".")))
         except ValueError:
             pass
     return ki
@@ -393,14 +438,21 @@ def _engedelyezett_szamok(f):
     return ki
 
 
+def _ismert(x, ok_szamok):
+    """Kerekítési tűréssel: 1% vagy 1 egység, amelyik nagyobb."""
+    for a in ok_szamok:
+        if abs(x - a) <= max(1.0, abs(a) * 0.01):
+            return True
+    return False
+
+
 def _ellenoriz(uzenetek, f):
     """Minden leírt szám szerepeljen a tényadatokban. Ami nem, azt eldobjuk."""
     ok_szamok = _engedelyezett_szamok(f)
     jo, hibak = [], []
     for u in uzenetek:
         szoveg = f"{u.get('sor','')} {u.get('szam','')} {u.get('cimke','')}"
-        idegen = [s for s in _szamok(szoveg)
-                  if s not in ok_szamok and round(s, 0) not in ok_szamok]
+        idegen = [s for s in _szamok(szoveg) if not _ismert(s, ok_szamok)]
         if idegen:
             hibak.append({"sor": u.get("sor"), "ismeretlen_szamok": sorted(idegen)})
             continue
@@ -460,6 +512,10 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
             "Használhatod a 'kartyak' értékeit is — ezeket a látogató a fejléc alatt látja.\n"
             "Témák: töltési ablak és ár; a mai fogyasztási csúcs és eltérése; "
             "a CatBoost és a MAVIR pontossága; nyitott adatminőségi jelzések.\n"
+            "Az időpontok ISO dátumot tartalmaznak: ha az időpont nem a mai napra "
+            "esik, ÍRD KI, hogy holnapi ablakról van szó.\n"
+            "A legérdekesebb az ELTÉRÉS: mennyivel több vagy kevesebb a szokásosnál "
+            "(fogyasztás a heti átlaghoz, ár a mai átlaghoz, napenergia az eddigi csúcshoz).\n"
             "Ne írj olyan számot, ami nincs a JSON-ban."
         )
         valasz = _gemini(prompt, _UZENET_SEMA)
@@ -496,9 +552,11 @@ def valasz(kerdes, data, ajanlas=None):
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
             f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
             "Válaszolj EGY megállapítással ugyanabban a formában "
-            "('sor', 'szam', 'cimke'). Ha az adatokból nem válaszolható meg, "
-            "a 'sor' legyen: 'Erre az élő adatokból most nem tudok pontos választ adni.' "
-            "és a 'szam' maradjon üres."
+            "('sor', 'szam', 'cimke'). Használd a 'megujulok', 'fogyasztas', 'dam', "
+            "'toltes', 'kartyak', 'modell_pontossag' és 'adatminoseg' mezőket. "
+            "Ha az időpont nem mai, írd ki, hogy holnapi. "
+            "Csak akkor mondd, hogy nem tudsz válaszolni, ha a kérdés témájához "
+            "TÉNYLEG nincs mező az adatokban."
         )
         v = _gemini(prompt, _UZENET_SEMA)
         jo, _ = _ellenoriz(v.get("uzenetek", [])[:1], f)
