@@ -129,21 +129,43 @@ def tenyek(data, ajanlas=None):
                                 "idopont": mert["idopont"]}
 
     val = data.get("validacio") or {}
-    napi = val.get("napi") or {}
-    if napi:
+    # A CatBoost és a MAVIR összevetése CSAK lezárt, teljes napon korrekt.
+    # A futó nap részleges órái nem hasonlíthatók össze, ezért kimaradnak.
+    ma_str = str(datetime.now().date())
+    lezart = next((n for n in (val.get("napok") or [])
+                   if n.get("nap") != ma_str and (n.get("orak") or 0) >= 20), None)
+    if lezart:
         f["modell_pontossag"] = {
-            "catboost_mae_mwh": _kerekit(napi.get("cb_mae"), 1),
-            "mavir_mae_mwh": _kerekit(napi.get("mavir_mae"), 1),
-            "orak_szama": napi.get("orak"),
+            "nap": lezart["nap"],
+            "catboost_mae_mwh": _kerekit(lezart["cb"], 1),
+            "mavir_mae_mwh": _kerekit(lezart["mv"], 1),
+            "orak_szama": lezart["orak"],
+            "megjegyzes": "lezárt nap, mindkét előrejelzés ugyanazokra az órákra",
         }
 
     naplo = val.get("naplo") or []
     if naplo:
         nyitott = sum(1 for r in naplo if r.get("kategoria") == "rejtely")
+        kat = {}
+        for r in naplo:
+            k = r.get("kategoria") or "besorolatlan"
+            kat[k] = kat.get(k, 0) + 1
+        legfrissebb = naplo[0]
         f["adatminoseg"] = {
             "jelzes_7_nap": len(naplo),
             "nyitott": nyitott,
             "megmagyarazva": len(naplo) - nyitott,
+            # A kategóriák MAGYARÁZATOK, nem feladatok:
+            "extrem_idojaras_db": kat.get("extrem", 0),
+            "alacsony_napsugarzas_db": kat.get("napelem", 0),
+            "homersekleti_fordulat_db": kat.get("fordulat", 0),
+            "meg_vizsgalando_db": kat.get("rejtely", 0),
+            "legfrissebb": {
+                "idopont": legfrissebb.get("ido"),
+                "kategoria": legfrissebb.get("kategoria"),
+                "elteres_mwh": _kerekit(legfrissebb.get("residual")),
+                "homerseklet_c": _kerekit(legfrissebb.get("homerseklet")),
+            },
         }
 
     meg = data.get("megujulo") or {}
@@ -303,16 +325,18 @@ def sablon_uzenetek(f):
     if m and m.get("catboost_mae_mwh") is not None and m.get("mavir_mae_mwh") is not None:
         jobb = m["catboost_mae_mwh"] < m["mavir_mae_mwh"]
         u.append({
-            "sor": ("A CatBoost ma pontosabb, mint a hivatalos MAVIR-előrejelzés."
-                    if jobb else "Ma a MAVIR-előrejelzés pontosabb a modellünknél."),
+            "sor": ("A legutóbbi lezárt napon a CatBoost pontosabb volt a hivatalos "
+                    "MAVIR-előrejelzésnél." if jobb else
+                    "A legutóbbi lezárt napon a MAVIR-előrejelzés volt a pontosabb."),
             "szam": f"{m['catboost_mae_mwh']:.0f} vs {m['mavir_mae_mwh']:.0f} MWh",
-            "cimke": "napi MAE · CatBoost / MAVIR",
+            "cimke": f"átlagos hiba · lezárt nap ({m['orak_szama']} óra)",
         })
 
     k = f.get("kartyak") or {}
     if k.get("budapest_homerseklet_c") is not None and f.get("dam"):
         u.append({
-            "sor": "Budapesten ennyi van most — a hőmérséklet húzza a fogyasztást és az árat is.",
+            "sor": "Budapesten most ennyi van — a meleg a hűtésen keresztül azonnal "
+                   "megjelenik a fogyasztásban.",
             "szam": f"{k['budapest_homerseklet_c']:.0f} °C",
             "cimke": "Budapest · most",
         })
@@ -342,12 +366,35 @@ def sablon_uzenetek(f):
 
     a = f.get("adatminoseg")
     if a:
-        u.append({
-            "sor": ("Minden friss jelzésre van magyarázat." if a["nyitott"] == 0
-                    else "Van még jelzés, ami magyarázatra vár az elmúlt hét napból."),
-            "szam": f"{a['nyitott']} nyitott",
-            "cimke": f"{a['jelzes_7_nap']} jelzés 7 nap · adatminőség-őr",
-        })
+        # Azt mondjuk el, AMI KIDERÜLT, nem azt, hogy mit kell megvizsgálni.
+        if a["extrem_idojaras_db"] >= max(a["alacsony_napsugarzas_db"],
+                                          a["homersekleti_fordulat_db"], 1):
+            u.append({
+                "sor": "A héten a szokatlan fogyasztási órák többségét a szélsőséges "
+                       "időjárás magyarázza — hőségben ugrik meg a hűtés.",
+                "szam": f"{a['extrem_idojaras_db']} óra",
+                "cimke": "extrém időjárás · elmúlt 7 nap",
+            })
+        elif a["alacsony_napsugarzas_db"] >= a["homersekleti_fordulat_db"]:
+            u.append({
+                "sor": "Borult órákon a napelemek kevesebbet adtak, ezért nőtt a "
+                       "hálózatból vett fogyasztás.",
+                "szam": f"{a['alacsony_napsugarzas_db']} óra",
+                "cimke": "alacsony napsugárzás · elmúlt 7 nap",
+            })
+        elif a["homersekleti_fordulat_db"] > 0:
+            u.append({
+                "sor": "Egy nap alatti nagy hőmérséklet-fordulat mozgatta meg a "
+                       "fogyasztást a héten.",
+                "szam": f"{a['homersekleti_fordulat_db']} óra",
+                "cimke": "hőmérsékleti fordulat · elmúlt 7 nap",
+            })
+        else:
+            u.append({
+                "sor": "A héten minden szokatlan órára megvan a magyarázat.",
+                "szam": f"{a['megmagyarazva']} / {a['jelzes_7_nap']}",
+                "cimke": "megmagyarázott jelzés · 7 nap",
+            })
 
     return u
 
@@ -516,6 +563,17 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
             "esik, ÍRD KI, hogy holnapi ablakról van szó.\n"
             "A legérdekesebb az ELTÉRÉS: mennyivel több vagy kevesebb a szokásosnál "
             "(fogyasztás a heti átlaghoz, ár a mai átlaghoz, napenergia az eddigi csúcshoz).\n"
+            "SZÓHASZNÁLAT: a 'kartyak.budapest_homerseklet_c' a MOST mért érték — "
+            "'most ennyi van', soha ne 'várható' vagy 'ma ennyi lesz'.\n"
+            "Az 'adatminoseg' kategóriái MAGYARÁZATOK, nem feladatok: az "
+            "extrem_idojaras_db a szélsőséges időjárás miatti órák száma, az "
+            "alacsony_napsugarzas_db a borult órákat jelenti, a homersekleti_fordulat_db "
+            "a napon belüli nagy hőmérséklet-fordulatot. Mondd el, MI OKOZTA az eltérést, "
+            "ne azt, hogy mit kell megvizsgálni. Csak a meg_vizsgalando_db esetén beszélj "
+            "nyitott kérdésről.\n"
+            "A 'modell_pontossag' MINDIG egy LEZÁRT napra vonatkozik: úgy fogalmazz, "
+            "hogy 'a legutóbbi lezárt napon', és soha ne írd, hogy 'ma'. "
+            "A két előrejelzést csak egymás mellett, ugyanarra a napra említsd.\n"
             "Ne írj olyan számot, ami nincs a JSON-ban."
         )
         valasz = _gemini(prompt, _UZENET_SEMA)
