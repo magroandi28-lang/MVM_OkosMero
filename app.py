@@ -310,12 +310,14 @@ def get_validacio_adatok():
             with conn.cursor() as cur:
                 cur.execute("""
                     select (target_time at time zone 'Europe/Budapest')::date as nap,
-                           count(*), avg(catboost_abs_error), avg(mavir_abs_error)
+                           count(*), avg(catboost_abs_error), avg(mavir_abs_error),
+                           avg(first_abs_error)
                     from public.forecast_log
                     group by 1 order by 1 desc limit 3
                 """)
                 napok = [{"nap": str(r[0]), "orak": int(r[1]),
-                          "cb": float(r[2]), "mv": float(r[3])}
+                          "cb": float(r[2]), "mv": float(r[3]),
+                          "first": float(r[4]) if r[4] is not None else None}
                          for r in cur.fetchall()]
                 cur.execute("""
                     select count(*), avg(case when catboost_abs_error < mavir_abs_error
@@ -347,14 +349,15 @@ def get_validacio_adatok():
                        "mv": float(h[3]) if h[3] is not None else None}
                 cur.execute("""
                     select extract(isodow from (target_time at time zone 'Europe/Budapest'))::int,
-                           avg(catboost_abs_error), avg(mavir_abs_error)
+                           avg(first_abs_error), avg(mavir_abs_error)
                     from public.forecast_log
                     where (target_time at time zone 'Europe/Budapest')
                           >= date_trunc('week', now() at time zone 'Europe/Budapest')
                     group by 1
                 """)
                 het["napok"] = {int(r[0]): bool(float(r[1]) <= float(r[2]))
-                                for r in cur.fetchall()}
+                                for r in cur.fetchall()
+                                if r[1] is not None and r[2] is not None}
                 cur.execute("""
                     select target_time at time zone 'Europe/Budapest', catboost_abs_error
                     from public.forecast_log
@@ -1948,7 +1951,9 @@ def _heti_naplo_panel(v):
         ], style={"display":"flex","alignItems":"center","gap":"8px","marginBottom":"7px"}))
 
     ROVID = ["H","K","Sze","Cs","P","Szo","V"]
-    napok = het.get("napok") or {}
+    # A dcc.Store JSON-t tárol: a dict kulcsai szövegként térnek vissza,
+    # ezért kellett a visszaalakítás — enélkül egyetlen pötty sem talált gazdát.
+    napok = {int(k): v for k, v in (het.get("napok") or {}).items()}
     cb_gyoz = sum(1 for w in napok.values() if w)
     mv_gyoz = sum(1 for w in napok.values() if not w)
     pottyok = []
@@ -1989,7 +1994,7 @@ def _heti_naplo_panel(v):
             style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 14px"}),
         *savok,
         html.Div([
-            html.Div("Napi győztes (élő CatBoost vs MAVIR)",
+            html.Div("Napi győztes (napelőtti CatBoost vs MAVIR · azonos horizont)",
                 style={"fontSize":"10px","color":C['mut'],"textTransform":"uppercase",
                        "letterSpacing":"0.05em","marginBottom":"6px"}),
             html.Div(pottyok, style={"display":"flex","gap":"7px","alignItems":"flex-start"}),
