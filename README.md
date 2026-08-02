@@ -682,3 +682,78 @@ STL-alapú anomáliákat azonosít;
 Supabase PostgreSQL-adatbázisban tárolja az előrejelzéseket és az anomáliákat;
 a jóslatokat a tényleges fogyasztással és a hivatalos MAVIR-előrejelzéssel is összehasonlítja;
 folyamatosan bővíti az éles validációs adatbázist.
+Flux – élő adatokra épülő intelligens asszisztens
+
+Az OkosMérő új főoldalán Flux, a rendszer beépített intelligens asszisztense segíti az alkalmazás használatát és az elemzési eredmények értelmezését.
+
+Flux:
+
+bemutatja az OkosMérő célját és fő funkcióit;
+közérthetően összefoglalja az aktuális fogyasztási előrejelzést;
+értelmezi a day-ahead árakat és a töltési ajánlást;
+bemutatja a nap- és szélerőművi előrejelzések eredményeit;
+összefoglalja az STL-alapú anomáliavizsgálat megállapításait;
+válaszol az alkalmazás adataival és működésével kapcsolatos kérdésekre.
+Élő adatokon alapuló válaszadás
+
+Flux nem előre eltárolt válaszokból és nem a Supabase-adatbázisból válaszol a felhasználói kérdésekre.
+
+A kérdés pillanatában a Gemini egy strukturált adatcsomagban megkapja az OkosMérő aktuális, élő eredményeit, többek között:
+
+az aktuális és előrejelzett fogyasztási adatokat;
+a CatBoost- és MAVIR-előrejelzések eredményeit;
+a day-ahead árakat;
+a töltési ajánlást;
+a nap- és szélerőművi adatokat;
+az anomáliavizsgálat eredményeit;
+az adatforrások minőségi és elérhetőségi állapotát.
+
+A Gemini kizárólag ebből az átadott adatcsomagból készíthet természetes nyelvű választ.
+
+Supabase-alapú gyorsítótár
+
+A generált válaszokhoz tartozó adatállapot egyedi azonosítót kap. Ha ugyanahhoz az adatállapothoz már készült érvényes összefoglaló, a rendszer azt a gyorsítótárból használja fel, és nem indít új Gemini-hívást.
+
+Ennek előnye:
+
+gyorsabb oldalbetöltés;
+alacsonyabb API-költség;
+kevesebb ismételt modellhívás;
+azonos adatokhoz következetes válasz.
+
+Új Gemini-hívás csak akkor szükséges, ha az alapul szolgáló energia-, időjárási, árfolyam- vagy modelleredmények megváltoztak.
+
+Auditálható szöveggenerálás
+
+Minden létrehozott összefoglalóhoz eltárolható:
+
+a generálás időpontja;
+az alapul szolgáló adatállapot azonosítója;
+a használt modell;
+a prompt verziója;
+a válasz típusa;
+az ellenőrzés eredménye;
+a generálás státusza.
+
+A lehetséges státuszok:
+
+gemini – a Gemini által készített és elfogadott válasz;
+fallback – determinisztikus sablonból készült válasz;
+rejected – az ellenőrzésen elutasított modellválasz.
+
+Ez lehetővé teszi annak utólagos ellenőrzését, hogy egy adott szöveg milyen adatokból, melyik modell- és promptverzióval készült, valamint átment-e a rendszer ellenőrzésén.
+
+Determinisztikus hibatűrés
+
+Ha a Gemini nem érhető el, túllépi az időkorlátot, hibás választ ad, vagy a válasz nem felel meg az ellenőrzési szabályoknak, a rendszer nem jeleníti meg a generált szöveget.
+
+Ilyenkor egy determinisztikus, az élő adatokból programozott szabályokkal összeállított összefoglaló jelenik meg.
+
+A fallback működés biztosítja, hogy:
+
+az oldal Gemini nélkül is használható marad;
+kitalált szám ne kerülhessen a felületre;
+csak az aktuális adatcsomagban ténylegesen szereplő értékek jelenjenek meg;
+az asszisztens hibája ne akadályozza az OkosMérő többi funkcióját.
+
+Flux így nem egyszerű chatbot, hanem az OkosMérő ellenőrzött adataira épülő, gyorsítótárazott, auditálható és hibatűrő természetes nyelvű értelmezési rétege.
