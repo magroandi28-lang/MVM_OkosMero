@@ -8,26 +8,6 @@ A projekt az eredetileg kézzel összegyűjtött és feldolgozott napi fogyaszt�
 
 A rendszer tehát nemcsak lényegesen nagyobb adatmennyiséget kezel, mint az eredeti diplomamunka, hanem az adatgyűjtéstől az előrejelzésen át az éles visszamérésig automatizált folyamatot valósít meg.
 
-Teljesen jogos a felvetésed.
-
-A GitHub README-ben a saját GitHub-linket külön kiírni valóban redundáns, mert:
-
-a felhasználó már ott van a repóban
-a „GitHub link” nem ad új információt
-csak zajt visz a dokumentumba
-
-Ez tipikusan portfólió-szövegből átvett sablonmaradvány, nem technikailag indokolt elem.
-
-Javított, tiszta verzió
-Élő rendszer
-Alkalmazás: https://okosmero.onrender.com
-Röviden a döntés indoka
-✅ Megmarad a fontos: élő demo link
-❌ Kikerül a felesleges: GitHub URL
-🎯 README célja itt: gyors kipróbálás + technikai áttekintés, nem önreferencia
-
-Ha akarod, végig tudom nézni a README-t ilyen „GitHub-szűrő szemmel”, és kiszedem az összes hasonlóan felesleges elemet (pl. duplikált linkek, túlmagyarázott részek, portfólió-szagú bekezdések).
-
 A projekt fejlődése
 
 Az OkosMérő előzménye az MVM DataInsight diplomamunka volt. Az eredeti rendszer négy fő modulban kapcsolta össze:
