@@ -213,22 +213,36 @@ def tenyek(data, ajanlas=None):
 
     meg = data.get("megujulo") or {}
     if meg.get("fc_nap") and meg.get("fc_szel"):
-        f["megujulok"] = {
-            "nap_varhato_csucs_mw": _kerekit(max(meg["fc_nap"])),
-            "szel_varhato_csucs_mw": _kerekit(max(meg["fc_szel"])),
-        }
+        idok = meg.get("ido") or []
+        most_ts = datetime.now()
+        jovo_nap, mult_nap = [], []
+        for i, iso in enumerate(idok):
+            if i >= len(meg["fc_nap"]):
+                break
+            try:
+                t = datetime.fromisoformat(iso)
+            except Exception:
+                continue
+            (jovo_nap if t > most_ts else mult_nap).append(float(meg["fc_nap"][i]))
+
+        mg = {"nap_mai_csucs_mw": _kerekit(max(meg["fc_nap"])),
+              "szel_mai_csucs_mw": _kerekit(max(meg["fc_szel"]))}
+        # A "várható" szó CSAK a hátralévő órákra igaz. Este a napelemes
+        # termelés már lecsengett, ilyenkor múlt időben beszélünk róla.
+        if jovo_nap and max(jovo_nap) > 50:
+            mg["nap_hatralevo_csucs_mw"] = _kerekit(max(jovo_nap))
+        else:
+            mg["nap_termeles_mara_lezarult"] = True
+            if mult_nap:
+                mg["nap_mai_tetozes_mw"] = _kerekit(max(mult_nap))
         if (meg.get("hiba_nap") or {}).get("mae") is not None:
-            f["megujulok"]["nap_mai_mae_mw"] = _kerekit(meg["hiba_nap"]["mae"])
+            mg["nap_mai_mae_mw"] = _kerekit(meg["hiba_nap"]["mae"])
         if (meg.get("hiba_szel") or {}).get("mae") is not None:
-            f["megujulok"]["szel_mai_mae_mw"] = _kerekit(meg["hiba_szel"]["mae"])
+            mg["szel_mai_mae_mw"] = _kerekit(meg["hiba_szel"]["mae"])
         mert_nap = [x for x in (meg.get("tny_nap") or []) if x is not None]
         if mert_nap:
-            f["megujulok"]["nap_eddigi_csucs_mw"] = _kerekit(max(mert_nap))
-            f["megujulok"]["nap_meg_varhato_novekedes_mw"] = _kerekit(
-                max(0.0, max(meg["fc_nap"]) - max(mert_nap)))
-        mert_szel = [x for x in (meg.get("tny_szel") or []) if x is not None]
-        if mert_szel:
-            f["megujulok"]["szel_eddigi_csucs_mw"] = _kerekit(max(mert_szel))
+            mg["nap_eddigi_merte_csucs_mw"] = _kerekit(max(mert_nap))
+        f["megujulok"] = mg
 
     hianyzo = data.get("hianyzo") or []
     minoseg = "complete" if not hianyzo else "partial"
@@ -400,13 +414,20 @@ def sablon_uzenetek(f):
             "szam": f"{ho:.0f} °C", "cimke": "mért hőmérséklet · Budapest"})
 
     mg = f.get("megujulok")
-    if mg and mg.get("nap_varhato_csucs_mw"):
-        cs = f"{mg['nap_varhato_csucs_mw']:,.0f}".replace(",", " ")
-        sor = (f"A napenergia-termelés mai várható csúcsértéke {cs} MW.")
-        if mg.get("nap_meg_varhato_novekedes_mw"):
-            no = f"{mg['nap_meg_varhato_novekedes_mw']:,.0f}".replace(",", " ")
-            sor += f" A mai eddigi legmagasabb értékhez képest ez további {no} MW emelkedést jelenthet."
-        u.append({"sor": sor, "szam": f"{cs} MW", "cimke": "várható napenergia-csúcs"})
+    if mg and mg.get("nap_hatralevo_csucs_mw"):
+        cs = f"{mg['nap_hatralevo_csucs_mw']:,.0f}".replace(",", " ")
+        u.append({
+            "sor": f"A napenergia-termelés a nap hátralévő részében várhatóan "
+                   f"{cs} MW körüli csúcsértéket érhet el.",
+            "szam": f"{cs} MW", "cimke": "hátralévő napenergia-csúcs"})
+    elif mg and mg.get("nap_termeles_mara_lezarult"):
+        tetoz = mg.get("nap_mai_tetozes_mw") or mg.get("nap_mai_csucs_mw")
+        if tetoz:
+            cs = f"{tetoz:,.0f}".replace(",", " ")
+            u.append({
+                "sor": f"A napelemes termelés mára lecsengett; a mai tetőzés "
+                       f"{cs} MW volt.",
+                "szam": f"{cs} MW", "cimke": "mai napenergia-tetőzés"})
 
     m = f.get("modell_pontossag")
     elso = (m or {}).get("catboost_elso_jóslat_mae_mwh")
@@ -605,6 +626,9 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
             "a CatBoost és a MAVIR pontossága; nyitott adatminőségi jelzések.\n"
             "Az időpontok ISO dátumot tartalmaznak: ha az időpont nem a mai napra "
             "esik, ÍRD KI, hogy holnapi ablakról van szó.\n"
+            "A 'megujulok.nap_hatralevo_csucs_mw' a HÁTRALÉVŐ órákra vonatkozik. Ha "
+            "helyette 'nap_termeles_mara_lezarult' szerepel, a napelemes termelésről "
+            "MÚLT időben beszélj, mert a nap már lement.\n"
             "Soha ne adj tanácsot a látogatónak és ne oktasd ki: csak azt mondd el, "
             "mit mutatnak az adatok.\n"
             "A legérdekesebb az ELTÉRÉS: mennyivel több vagy kevesebb a szokásosnál "
@@ -648,13 +672,41 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
     return vegleges
 
 
+_KULCSSZAVAK = [
+    (("napelem", "napenergia", "nap ", "szolár", "solar"), ("napenergia", "napelem")),
+    (("szél", "szel "), ("szél",)),
+    (("ár", "árak", "olcsó", "drága", "tölt", "töltés"), ("€/MWh", "ár")),
+    (("fogyaszt", "terhel", "csúcs"), ("MWh", "fogyaszt", "terhel")),
+    (("hőmérsék", "meleg", "hideg", "fok", "időjárás"), ("°C", "hőmérsék")),
+    (("modell", "pontos", "hiba", "catboost", "mavir"), ("eltér", "előrejelz")),
+    (("anomál", "szokatlan", "eltérés", "stl"), ("szokatlan", "mintázat")),
+]
+
+
+def _kereses_a_sajat_szovegekben(kerdes, uzenetek):
+    """Ha a Gemini nem elérhető vagy a válasza elbukik az ellenőrzésen,
+    a kérdés kulcsszavai alapján a saját, adatból számolt mondataink közül
+    választunk — így Flux nem hallgat el."""
+    k = str(kerdes).lower()
+    for minta, jelolok in _KULCSSZAVAK:
+        if not any(m in k for m in minta):
+            continue
+        for u in uzenetek:
+            szoveg = f"{u.get('sor','')} {u.get('cimke','')}".lower()
+            if any(j.lower() in szoveg for j in jelolok):
+                return u
+    return None
+
+
 def valasz(kerdes, data, ajanlas=None):
     """A látogató kérdésére adott egyetlen válasz. Ellenőrzésen bukás esetén őszinte nemet mond."""
     f, _ = tenyek(data, ajanlas)
-    nem_tudom = {"sor": "Erre az élő adatokból most nem tudok pontos választ adni.",
+    nem_tudom = {"sor": "Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre "
+                        "pontos válasz.",
                  "szam": None, "cimke": None}
     if f is None or not str(kerdes).strip():
         return nem_tudom
+    sajat = sablon_uzenetek(f)
     try:
         prompt = (
             "Élő adatok:\n"
@@ -668,8 +720,10 @@ def valasz(kerdes, data, ajanlas=None):
             "TÉNYLEG nincs mező az adatokban."
         )
         v = _gemini(prompt, _UZENET_SEMA)
-        jo, _ = _ellenoriz(v.get("uzenetek", [])[:1], f)
-        return jo[0] if jo else nem_tudom
+        jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
+        if jo:
+            return jo[0]
+        print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
-        return nem_tudom
+    return _kereses_a_sajat_szovegekben(kerdes, sajat) or nem_tudom
