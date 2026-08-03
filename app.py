@@ -1324,6 +1324,7 @@ app.layout = html.Div([
         dcc.Store(id="flux-valasz",data=None),
         dcc.Store(id="flux-noop",data=None),
         dcc.Store(id="flux-varakozas",data=None),
+        dcc.Store(id="flux-kerdes-kontextus",data=None),
     ],className="app-main")
 ],className="app-shell")
 
@@ -1521,6 +1522,38 @@ def fetch(n,_manual):
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
+    # ---- Összevetés a TEGNAPI azonos órával ----
+    # A heti átlag a "megszokotthoz" méri a fogyasztást, ez viszont a konkrét
+    # előző naphoz — erre a leggyakoribb a kérdés: mennyivel több vagy kevesebb
+    # ma, mint tegnap ugyanekkor.
+    tegnaphoz = None
+    if load_ok and len(load) > 25:
+        try:
+            t_most = load.index.max()
+            t_tegnap = t_most - pd.Timedelta(hours=24)
+            if t_tegnap in load.index:
+                v_most = float(load.loc[t_most]); v_tegnap = float(load.loc[t_tegnap])
+                tegnaphoz = {
+                    "ora": t_most.strftime("%H:%M"),
+                    "mai_mwh": round(v_most, 1),
+                    "tegnapi_mwh": round(v_tegnap, 1),
+                    "elteres_mwh": round(v_most - v_tegnap, 1),
+                    "elteres_szazalek": (round((v_most - v_tegnap) / v_tegnap * 100, 1)
+                                         if v_tegnap else None),
+                }
+                # A két nap eddigi átlaga is: az egy óra önmagában zajos lehet.
+                ma_eddig = load[load.index >= pd.Timestamp(ma)]
+                tegnap_ugyaneddig = load[(load.index >= pd.Timestamp(ma) - pd.Timedelta(days=1))
+                                         & (load.index <= t_tegnap)]
+                if len(ma_eddig) >= 3 and len(tegnap_ugyaneddig) >= 3:
+                    a_ma = float(ma_eddig.mean()); a_teg = float(tegnap_ugyaneddig.mean())
+                    tegnaphoz["mai_atlag_mwh"] = round(a_ma, 1)
+                    tegnaphoz["tegnapi_atlag_mwh"] = round(a_teg, 1)
+                    tegnaphoz["atlag_elteres_szazalek"] = (
+                        round((a_ma - a_teg) / a_teg * 100, 1) if a_teg else None)
+        except Exception as e:
+            print(f"[HIBA] Tegnapi összevetés: {e}", flush=True)
+
     mert = None
     heti_atlag = None
     if load_ok:
@@ -1566,6 +1599,7 @@ def fetch(n,_manual):
         "ido_forras":ido_forras if ido_ok else None,
         "aho":aho if ho_ok else None,
         "mert_fogyasztas":mert,
+        "tegnaphoz":tegnaphoz,
         "heti_atlag":heti_atlag,
         "megujulo":megujulo,
         "stl":stl_data,
@@ -1772,7 +1806,13 @@ def nyitooldal():
                                             "letterSpacing":"1.4px","textTransform":"uppercase"})
         ],id="flux-szam-doboz",style={"display":"none","flexDirection":"column","gap":"4px"}),
 
-        dcc.Input(id="flux-kerdes",type="text",debounce=False,
+        # debounce=True: enélkül az Enter (`n_submit`) és a beírt szöveg
+        # (`value`) külön üzenetben ér a szerverhez, és versenyeznek. Aki
+        # gépelés után azonnal Entert üt, annál a `value` még az ELŐZŐ állapot
+        # — a callback üres szöveget lát, nem csinál semmit, és csak a MÁSODIK
+        # Enterre indul el a válasz. A debounce az Enterre egyszerre küldi a
+        # kettőt, így az első leütés is működik.
+        dcc.Input(id="flux-kerdes",type="text",debounce=True,
                   placeholder="Kérdezz Fluxtól, majd Enter…",className="flux-kerdes"),
 
     ],className="flux-reteg")
@@ -1800,20 +1840,27 @@ def flux_szovegek(data):
         return flux.uzenetek(data, aj)
     except Exception as e:
         print(f"[FLUX] Szövegek: {e}", flush=True)
-        return [{"sor":flux.KOSZONTO,"szam":None,"cimke":None}]
+        return [{"sor":flux.elo_koszonto(),"szam":None,"cimke":None}]
 
 
 # ---- Flux: a látogató kérdése ----
+# A kérdést NEM közvetlenül az Enter indítja, hanem a `flux-kerdes-kontextus`
+# store változása. Így garantált a sorrend: előbb fut a böngészőben az a
+# kliensoldali callback, amelyik beleteszi a store-ba az ÉPPEN OLVASOTT
+# megállapítást, és csak utána indul a szerveroldali válasz — amely így már
+# ismeri a kérdés kontextusát. Fordított sorrendben a szerver mindig az előző
+# képernyőállapotot látná.
 @callback([Output("flux-valasz","data"),Output("flux-kerdes","value")],
-    Input("flux-kerdes","n_submit"),
+    Input("flux-kerdes-kontextus","data"),
     [State("flux-kerdes","value"),State("adatok","data")],
     prevent_initial_call=True)
-def flux_kerdes(_n, kerdes, data):
+def flux_kerdes(kontextus, kerdes, data):
     if not kerdes or not str(kerdes).strip():
         return dash.no_update, dash.no_update
     try:
         aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
-        v = flux.valasz(kerdes, data, aj)
+        v = flux.valasz(kerdes, data, aj,
+                        kontextus=(kontextus or {}).get("sor"))
     except Exception as e:
         print(f"[FLUX] Kérdés callback: {e}", flush=True)
         v = {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
@@ -1847,11 +1894,15 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(n_submit) {
-        if (n_submit && window.fluxVarakozas) window.fluxVarakozas();
-        return window.dash_clientside.no_update;
+        if (!n_submit) return window.dash_clientside.no_update;
+        if (window.fluxVarakozas) window.fluxVarakozas();
+        // Az ÉPPEN OLVASOTT megállapítás elmegy a kérdéssel: enélkül az
+        // "és ez mit jelent?" kérdésre Flux nem tudta, mire vonatkozik a "ez".
+        var sor = (window.fluxAktualis ? window.fluxAktualis() : "");
+        return {sor: sor, n: n_submit};
     }
     """,
-    Output("flux-varakozas","data"),
+    Output("flux-kerdes-kontextus","data"),
     Input("flux-kerdes","n_submit"),
     prevent_initial_call=True,
 )

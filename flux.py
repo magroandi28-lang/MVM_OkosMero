@@ -61,6 +61,35 @@ KOSZONTO = (
     "és hol talált szokatlan eltérést a rendszer."
 )
 
+
+def _napszak(m=None):
+    """Melyik napszakban vagyunk — budapesti falióra szerint."""
+    h = (m or _most()).hour
+    if h < 5:    return "hajnal"
+    if h < 9:    return "reggel"
+    if h < 12:   return "délelőtt"
+    if h < 14:   return "dél"
+    if h < 18:   return "délután"
+    if h < 22:   return "este"
+    return "éjszaka"
+
+
+def _udvozles(m=None):
+    """Napszaknak megfelelő köszönés. Ettől látszik, hogy Flux tudja, hány óra van."""
+    return {"hajnal": "Jó éjszakát!", "reggel": "Jó reggelt!",
+            "délelőtt": "Szia!", "dél": "Szia!", "délután": "Szia!",
+            "este": "Jó estét!", "éjszaka": "Jó estét!"}[_napszak(m)]
+
+
+def elo_koszonto(m=None):
+    """Élő köszöntő: köszönés + napszak. A látogató első mondatból látja,
+    hogy nem egy előre megírt szöveget olvas, hanem valamit, ami tudja,
+    mikor nézi az oldalt."""
+    m = m or _most()
+    return (f"{_udvozles(m)} Flux vagyok, az OkosMérő energiaasszisztense. "
+            f"Most {m:%H:%M} van; élő energiapiaci és időjárási adatokból mondom el, "
+            f"mi történik éppen a magyar villamosenergia-rendszerben.")
+
 FLUX_SZEREP = (
     "Te vagy Flux, az OkosMérő energiapiaci irányítópult asszisztense. "
     "Magyarul, tegezve, barátságosan és tömören beszélsz. "
@@ -70,42 +99,51 @@ FLUX_SZEREP = (
     "Ha egy adat hiányzik, arról a témáról nem beszélsz."
 )
 
+# A látogató KÉRDÉSÉRE más hangnem kell, mint a főoldali megállapításokhoz.
+# A fenti szerep szándékosan szikár — jelentést ír, nem beszélget. Emiatt a
+# válaszok gépiesnek hatottak: se megszólítás, se reakció a kérdésre, csak egy
+# tőmondat adatokkal. A szám-szabály ugyanaz marad, a hang viszont emberi.
+FLUX_SZEREP_KERDES = (
+    "Te vagy Flux, az OkosMérő energiaasszisztense. Egy látogató most kérdezett "
+    "tőled az oldalon. Úgy válaszolj, mint egy segítőkész, jókedvű szakértő kolléga, "
+    "aki melletted ül: magyarul, tegezve, természetes, élő mondatokban. "
+    "NEM jelentést írsz, hanem beszélgetsz.\n"
+    "A válasz két-három mondat legyen ebben a menetben:\n"
+    "1) rövid emberi reakció a kérdésre (pl. 'Jó kérdés', 'Nézzük', 'Épp jókor kérded'),\n"
+    "2) a lényeg az élő adatokból, a számmal a mondatban,\n"
+    "3) egy rövid, hasznos hozzáfűzés vagy felajánlás, hogy mit nézhet még meg.\n"
+    "Vedd figyelembe a napszakot: hajnalban ne úgy írj, mintha dél lenne.\n"
+    "KEMÉNY SZABÁLY, ettől soha nem térhetsz el: kizárólag a megkapott JSON "
+    "adatokra támaszkodhatsz, és számot csak akkor írhatsz le, ha az pontosan "
+    "szerepel az adatokban. Nem becsülsz, nem kerekítesz át, nem találsz ki semmit. "
+    "Ha egy adat hiányzik, mondd meg őszintén, hogy arról most nincs adatod."
+)
+
 
 # Zárómondatok: nincs bennük élő adat, ezért mindig kimennek —
 # a Gemini-változat végére is. Ezek hívják körbe a látogatót az oldalon.
 # A modellek bemutatása. Ezek NEM élő adatok, hanem a dokumentált,
 # offline validált eredmények — ezért fix szövegek, nem a Gemini írja.
+# Ebből a nyolc statikus mondatból eredetileg mind a nyolc benne forgott a
+# körben, az öt-hat élő megállapítás mellett. Így a látogató idejének majdnem
+# a felében bemagolt, adat nélküli szöveget olvasott — ettől hatott
+# élettelennek az egész. Kettő-kettő maradt, a többi kikerült.
 MODELL_UZENETEK = [
-    {"sor": "Az OkosMérő két külön módszert használ: a CatBoost előrejelzi a várható "
-            "fogyasztást, az STL pedig megkeresi a szokatlan eltéréseket.",
-     "szam": None, "cimke": None},
-    {"sor": "A CatBoost egy gépi tanulási modell: korábbi villamosenergia-adatokból "
-            "tanulta meg, hogy különböző körülmények között általában hogyan változik "
-            "az ország fogyasztása.",
-     "szam": None, "cimke": None},
-    {"sor": "Az STL azt vizsgálja, hogy a ténylegesen bekövetkezett fogyasztás mennyire "
-            "tér el a megszokott mintától.",
-     "szam": None, "cimke": None},
-    {"sor": "A két módszer együtt nemcsak előrejelzést ad, hanem segít felismerni, "
-            "amikor az energiarendszer viselkedése valamilyen okból szokatlanná válik.",
+    {"sor": "Az OkosMérő két külön módszert használ: a CatBoost gépi tanulási modell "
+            "előrejelzi a várható fogyasztást, az STL pedig megkeresi a szokatlan "
+            "eltéréseket és magyarázatot keres rájuk.",
      "szam": None, "cimke": None},
 ]
 
 
 ZARO_UZENETEK = [
-    {"sor": "Kérdezz nyugodtan a beviteli mezőben: az árakról, a fogyasztásról, a nap- "
-            "és széltermelésről, az időjárásról vagy a modell pontosságáról is "
-            "válaszolok az élő adatokból.",
+    {"sor": "Kérdezz nyugodtan a beviteli mezőben: az árakról, a töltési ablakról, a "
+            "fogyasztásról, a nap- és széltermelésről, az időjárásról vagy a modell "
+            "pontosságáról is válaszolok az élő adatokból.",
      "szam": None, "cimke": None},
-    {"sor": "Nézz körül nyugodtan: a DAM-árak és töltés fülön negyedórás "
-            "bontásban látod a másnapi árakat és az ajánlott töltési ablakokat.",
-     "szam": None, "cimke": None},
-    {"sor": "Az Energiaelemzés fülön a következő órák fogyasztási előrejelzése, "
-            "a Megújulókon a nap- és széltermelés terve és tényleges alakulása várja.",
-     "szam": None, "cimke": None},
-    {"sor": "Az ML Modell Labor pedig élőben mutatja a két modellt: a CatBoost "
-            "gépi tanulási modell órákra előre becsli a fogyasztást, az STL-módszer "
-            "pedig a szokásostól eltérő órákat találja meg és keresi rájuk a magyarázatot.",
+    {"sor": "A DAM-árak és töltés fülön negyedórás bontásban látod a másnapi árakat, "
+            "az Energiaelemzésen a következő órák fogyasztását, a Megújulókon a nap- és "
+            "széltermelést, az ML Modell Laborban pedig a két modellt élőben.",
      "szam": None, "cimke": None},
 ]
 
@@ -224,6 +262,13 @@ def tenyek(data, ajanlas=None):
         if akt:
             f["fogyasztas"]["aktualis_ora_mwh"] = _kerekit(akt["fogyasztas"])
             f["fogyasztas"]["aktualis_ora"] = akt["datum"]
+        # Elmúlt-e már a mai csúcs? Éjjel igen — ilyenkor nem a csúccsal kell
+        # kezdeni, hanem azzal, amit a modell a MOST futó órára jósol.
+        csucs_ts = _ts(csucs["datum"])
+        f["fogyasztas"]["csucs_meg_hatravan"] = bool(csucs_ts and csucs_ts > most_ts)
+        # Este a 24 órás előrejelzési ablak átnyúlik holnapra, ezért a csúcs
+        # órája is holnapi lehet. Ilyenkor tilos "mai csúcsot" mondani rá.
+        f["fogyasztas"]["csucs_ma_van"] = bool(csucs_ts and csucs_ts.date() == ma_datum)
         heti = data.get("heti_atlag")
         if heti:
             ora = (_ts(csucs["datum"]) or most_ts).hour
@@ -244,6 +289,10 @@ def tenyek(data, ajanlas=None):
     if mert:
         f["mert_fogyasztas"] = {"ertek_mwh": _kerekit(mert["ertek"]),
                                 "idopont": mert["idopont"]}
+
+    teg = data.get("tegnaphoz")
+    if teg and teg.get("tegnapi_mwh"):
+        f["tegnapi_osszevetes"] = {k: v for k, v in teg.items() if v is not None}
 
     # ---------- Modell pontossága ----------
     val = data.get("validacio") or {}
@@ -328,6 +377,10 @@ def tenyek(data, ajanlas=None):
         tny_nap = meg.get("tny_nap") or []
         tny_szel = meg.get("tny_szel") or []
 
+        # (időbélyeg, érték) párokat tartunk, mert a csúcs ÓRÁJA is kell:
+        # "13:00 körül tetőzik" hajnali egykor is értelmes mondat, a
+        # "nap hátralévő részében várható" viszont ilyenkor képtelenség —
+        # hajnali egykor az egész nap hátravan.
         ma_nap, ma_szel = [], []            # mai óra, jóslat
         jovo_nap, jovo_szel = [], []        # mai óra, még hátra van
         mult_nap = []                       # mai óra, már elmúlt
@@ -343,10 +396,10 @@ def tenyek(data, ajanlas=None):
                 continue
             n, sz = float(fc_nap[i]), float(fc_szel[i])
             if t.date() == ma_datum:
-                ma_nap.append(n); ma_szel.append(sz)
-                (jovo_nap if t > most_ts else mult_nap).append(n)
+                ma_nap.append((t, n)); ma_szel.append((t, sz))
+                (jovo_nap if t > most_ts else mult_nap).append((t, n))
                 if t > most_ts:
-                    jovo_szel.append(sz)
+                    jovo_szel.append((t, sz))
                 if i < len(tny_nap) and tny_nap[i] is not None:
                     mert_nap_ma.append(float(tny_nap[i]))
                     utolso_mert_nap = (t, float(tny_nap[i]))
@@ -354,31 +407,50 @@ def tenyek(data, ajanlas=None):
                     mert_szel_ma.append(float(tny_szel[i]))
                     utolso_mert_szel = (t, float(tny_szel[i]))
             elif t.date() == holnap_datum:
-                holnap_nap.append(n); holnap_szel.append(sz)
+                holnap_nap.append((t, n)); holnap_szel.append((t, sz))
+
+        def _csucs(parok):
+            """A legnagyobb érték és az órája."""
+            return max(parok, key=lambda p: p[1]) if parok else (None, None)
 
         mg = {}
         if ma_nap:
-            mg["nap_mai_csucs_mw"] = _kerekit(max(ma_nap))
+            t_cs, v_cs = _csucs(ma_nap)
+            mg["nap_mai_csucs_mw"] = _kerekit(v_cs)
+            mg["nap_mai_csucs_ido"] = t_cs.isoformat()
+            # A csúcs a jövőben van-e még? Ettől függ, hogy jelen/jövő vagy
+            # múlt időben szabad-e beszélni róla.
+            mg["nap_csucs_meg_hatravan"] = bool(t_cs > most_ts)
         if ma_szel:
-            mg["szel_mai_csucs_mw"] = _kerekit(max(ma_szel))
-            mg["szel_mai_atlag_mw"] = _kerekit(sum(ma_szel) / len(ma_szel))
+            t_sz, v_sz = _csucs(ma_szel)
+            mg["szel_mai_csucs_mw"] = _kerekit(v_sz)
+            mg["szel_mai_csucs_ido"] = t_sz.isoformat()
+            mg["szel_csucs_meg_hatravan"] = bool(t_sz > most_ts)
+            mg["szel_mai_atlag_mw"] = _kerekit(
+                sum(v for _, v in ma_szel) / len(ma_szel))
 
         # A "várható" szó CSAK a MAI hátralévő órákra igaz. Este a napelemes
         # termelés már lecsengett, ilyenkor múlt időben beszélünk róla.
-        if jovo_nap and max(jovo_nap) > 50:
-            mg["nap_hatralevo_csucs_mw"] = _kerekit(max(jovo_nap))
+        t_jovo, v_jovo = _csucs(jovo_nap)
+        if v_jovo is not None and v_jovo > 50:
+            mg["nap_hatralevo_csucs_mw"] = _kerekit(v_jovo)
+            mg["nap_hatralevo_csucs_ido"] = t_jovo.isoformat()
         else:
             mg["nap_termeles_mara_lezarult"] = True
-            if mult_nap:
-                mg["nap_mai_tetozes_mw"] = _kerekit(max(mult_nap))
+            t_mult, v_mult = _csucs(mult_nap)
+            if v_mult is not None:
+                mg["nap_mai_tetozes_mw"] = _kerekit(v_mult)
+                mg["nap_mai_tetozes_ido"] = t_mult.isoformat()
         if jovo_szel:
-            mg["szel_hatralevo_csucs_mw"] = _kerekit(max(jovo_szel))
+            mg["szel_hatralevo_csucs_mw"] = _kerekit(_csucs(jovo_szel)[1])
 
         # A holnapi terv KÜLÖN mező, saját címkével — sosem keveredhet a maival.
         if holnap_nap:
-            mg["nap_holnapi_csucs_mw"] = _kerekit(max(holnap_nap))
+            t_h, v_h = _csucs(holnap_nap)
+            mg["nap_holnapi_csucs_mw"] = _kerekit(v_h)
+            mg["nap_holnapi_csucs_ido"] = t_h.isoformat()
         if holnap_szel:
-            mg["szel_holnapi_csucs_mw"] = _kerekit(max(holnap_szel))
+            mg["szel_holnapi_csucs_mw"] = _kerekit(_csucs(holnap_szel)[1])
 
         if (meg.get("hiba_nap") or {}).get("mae") is not None:
             mg["nap_mai_mae_mw"] = _kerekit(meg["hiba_nap"]["mae"])
@@ -417,6 +489,10 @@ def tenyek(data, ajanlas=None):
     f["_meta"] = {
         "frissites": data.get("frissites"),
         "hianyzo_forrasok": hianyzo,
+        # A napszak a szövegek igeidejét és a köszönést vezérli. Enélkül a
+        # modell nem tudja, hogy hajnal van-e vagy dél.
+        "napszak": _napszak(most_ts),
+        "helyi_ido": most_ts.strftime("%H:%M"),
     }
     return f, minoseg
 
@@ -431,7 +507,10 @@ def _hash(facts):
 
 
 def _cache_key(facts_hash):
-    return f"{facts_hash}:{GEMINI_MODEL}:{PROMPT_VERSION}:{LANGUAGE}"
+    # A napszak resze a kulcsnak: enelkul a koszones atcsuszna a
+    # napszakhataron ("Jo estet!" hajnali egykor).
+    return (f"{facts_hash}:{GEMINI_MODEL}:{PROMPT_VERSION}:{LANGUAGE}"
+            f":{_napszak()}")
 
 
 # ============================================================
@@ -445,6 +524,50 @@ def _cache_key(facts_hash):
 _MEMO = {}
 _MEMO_LOCK = threading.Lock()
 _MEMO_MAX = 32
+
+# ---- Kvóta-védelem ----
+# Ha egyszerre többen nyitják meg az oldalt (pl. egy elküldött pályázat után),
+# a Gemini ingyenes kerete percek alatt kimerülhet. Onnantól minden hívás
+# 429-cel jön vissza — de mindegyik VÁRAKOZÁSSAL, tehát a látogató úgy éli
+# meg, hogy Flux lassú és néma. Ezért az első kvóta-hiba után egy ideig
+# meg sem próbáljuk: a determinisztikus válasz azonnal megy ki.
+_KVOTA_LOCK = threading.Lock()
+_KVOTA_TILTAS_PERC = 10
+_kvota_tiltva_eddig = 0.0
+
+# A főoldali szöveg legyártása egyszerre csak EGY szálon fusson. Enélkül
+# öt egyidejű látogató öt külön Gemini-hívást indítana ugyanarra az
+# adatállapotra — ötszörös kvótafogyasztás ugyanazért az eredményért.
+_GYARTAS_LOCK = threading.Lock()
+
+# A kérdésekre adott válaszok is gyorsítótárba kerülnek. Több látogató
+# jellemzően ugyanazt kérdezi ("mit tudsz?", "mennyi az ár?"), ezért ez
+# érdemben csökkenti a hívások számát.
+_VALASZ_MEMO = {}
+_VALASZ_MEMO_MAX = 64
+_VALASZ_TTL = 600
+
+
+def _valasz_memo_ir(kulcs, ertek):
+    with _MEMO_LOCK:
+        if len(_VALASZ_MEMO) >= _VALASZ_MEMO_MAX:
+            legregebbi = min(_VALASZ_MEMO, key=lambda k: _VALASZ_MEMO[k]["lejar"])
+            _VALASZ_MEMO.pop(legregebbi, None)
+        _VALASZ_MEMO[kulcs] = {"ertek": ertek, "lejar": time.time() + _VALASZ_TTL}
+
+
+def _kvota_blokkolt():
+    with _KVOTA_LOCK:
+        return time.time() < _kvota_tiltva_eddig
+
+
+def _kvota_jelez():
+    """Kvóta-hiba után egy ideig meg sem hívjuk a modellt."""
+    global _kvota_tiltva_eddig
+    with _KVOTA_LOCK:
+        _kvota_tiltva_eddig = time.time() + _KVOTA_TILTAS_PERC * 60
+    print(f"[FLUX] Kvóta betelt — {_KVOTA_TILTAS_PERC} percig a saját "
+          f"szövegekből válaszolok.", flush=True)
 
 
 def _memo_olvas(kulcs):
@@ -559,6 +682,116 @@ def _ezres(x, tizedes=0):
     return f"{x:,.{tizedes}f}".replace(",", " ")
 
 
+def _nap_mondat(mg):
+    """A napelemes termelés mondata — a NAPSZAKHOZ igazítva.
+
+    A korábbi szöveg minden órában azt írta, hogy "a nap hátralévő részében
+    várható". Hajnali egykor ez képtelenség: olyankor az egész nap hátravan,
+    a mondat mégis úgy hangzik, mintha a nap már félig eltelt volna. Ezért a
+    csúcs ÓRÁJA kerül a mondatba, és három eset van:
+      - a csúcs még hátravan   -> "13:00 körül tetőzik"
+      - a csúcs elmúlt, de van még termelés -> tetőzés múlt időben + hátralévő
+      - a termelés lecsengett  -> kizárólag múlt idő, a holnapi terv külön
+    """
+    if not mg:
+        return None
+
+    if mg.get("nap_termeles_mara_lezarult"):
+        tetoz = mg.get("nap_mai_tetozes_mw") or mg.get("nap_mai_csucs_mw")
+        if not tetoz:
+            return None
+        cs = _ezres(tetoz)
+        ido = _ido(mg.get("nap_mai_tetozes_ido") or mg.get("nap_mai_csucs_ido"))
+        sor = f"A mai napelemes termelés lecsengett; a tetőzés {ido} körül {cs} MW volt."
+        # A holnapi terv KÜLÖN mondatban, egyértelmű címkével — sosem
+        # keveredhet össze a mai értékkel.
+        if mg.get("nap_holnapi_csucs_mw"):
+            sor += (f" Holnapra a napelőtti terv "
+                    f"{_ezres(mg['nap_holnapi_csucs_mw'])} MW körüli csúcsot jelez.")
+        return {"sor": sor, "szam": f"{cs} MW", "cimke": "mai napenergia-tetőzés"}
+
+    if mg.get("nap_csucs_meg_hatravan") and mg.get("nap_mai_csucs_mw"):
+        cs = _ezres(mg["nap_mai_csucs_mw"])
+        ido = _ido(mg.get("nap_mai_csucs_ido"))
+        return {"sor": f"A napelemes termelés a mai napelőtti terv szerint {ido} "
+                       f"körül tetőzik, {cs} MW-tal.",
+                "szam": f"{cs} MW", "cimke": "mai napenergia-csúcs"}
+
+    if mg.get("nap_hatralevo_csucs_mw"):
+        # A napi csúcs már elmúlt, de még van termelés hátra.
+        cs = _ezres(mg["nap_hatralevo_csucs_mw"])
+        sor = ""
+        if mg.get("nap_mai_csucs_mw"):
+            sor = (f"A mai napelemes tetőzés {_ido(mg.get('nap_mai_csucs_ido'))} körül "
+                   f"{_ezres(mg['nap_mai_csucs_mw'])} MW volt. ")
+        sor += (f"A nap hátralévő részében {cs} MW a legmagasabb várható érték.")
+        return {"sor": sor, "szam": f"{cs} MW", "cimke": "hátralévő napenergia-csúcs"}
+    return None
+
+
+def _tegnap_mondat(f):
+    """Összevetés a TEGNAPI azonos órával — mért adatból, nem jóslatból."""
+    t = f.get("tegnapi_osszevetes") or {}
+    sz = t.get("elteres_szazalek")
+    if sz is None:
+        return None
+    ma_v, teg_v = _ezres(t["mai_mwh"]), _ezres(t["tegnapi_mwh"])
+    if abs(sz) < 1:
+        sor = (f"A ma {t['ora']}-kor mért fogyasztás {ma_v} MWh, gyakorlatilag "
+               f"ugyanannyi, mint tegnap ugyanebben az órában ({teg_v} MWh).")
+    else:
+        irany = "több" if sz > 0 else "kevesebb"
+        sor = (f"A ma {t['ora']}-kor mért fogyasztás {ma_v} MWh, ami "
+               f"{abs(sz):.0f} százalékkal {irany}, mint tegnap ugyanebben az "
+               f"órában ({teg_v} MWh).")
+    atl = t.get("atlag_elteres_szazalek")
+    if atl is not None and abs(atl) >= 1:
+        sor += (f" A mai nap eddigi átlaga {abs(atl):.0f} százalékkal "
+                f"{'magasabb' if atl > 0 else 'alacsonyabb'}, mint tegnap ugyaneddig.")
+    return {"sor": sor, "szam": f"{sz:+.0f}%", "cimke": "eltérés a tegnapi azonos órától"}
+
+
+def _ho_mondat(ho, f):
+    """A hőmérséklet mondata a HŐMÉRSÉKLETHEZ igazítva.
+
+    A korábbi szöveg minden esetben a "hűtési igényen keresztül" fordulatot
+    használta — éjjel, 12 fokban is. A hűtés csak melegben magyarázat, a fűtés
+    csak hidegben; a kettő között egyik sem, ilyenkor a napi szélsőértékek
+    mondanak többet."""
+    ido = f.get("idojaras") or {}
+    if ho >= 24:
+        sor = (f"A budapesti mért hőmérséklet most {ho:.0f} °C; ezen a szinten a hűtés "
+               f"érezhetően megemeli a rendszerterhelést.")
+    elif ho <= 10:
+        sor = (f"A budapesti mért hőmérséklet most {ho:.0f} °C; ezen a szinten a fűtési "
+               f"igény hajtja fel a rendszerterhelést.")
+    else:
+        sor = (f"A budapesti mért hőmérséklet most {ho:.0f} °C, ami mérsékelt fűtési és "
+               f"hűtési igényt jelent.")
+    if ido.get("mai_max_c") is not None and ido.get("mai_min_c") is not None:
+        sor += (f" A mai napi szélsőértékek {ido['mai_min_c']:.0f} és "
+                f"{ido['mai_max_c']:.0f} °C.")
+    return sor
+
+
+def _szel_mondat(mg):
+    """A széltermelés mondata — a napelemessel azonos igeidő-logikával:
+    ha a napi csúcs órája még hátravan, jelen időben; ha elmúlt, múlt időben."""
+    if not mg or mg.get("szel_mai_csucs_mw") is None:
+        return None
+    cs = _ezres(mg["szel_mai_csucs_mw"])
+    ido = _ido(mg.get("szel_mai_csucs_ido"))
+    if mg.get("szel_csucs_meg_hatravan"):
+        sor = (f"A szélerőművek mai termelése a napelőtti terv szerint {ido} körül "
+               f"tetőzik, {cs} MW-tal.")
+    else:
+        sor = (f"A szélerőművek mai termelése a napelőtti terv szerint {ido} körül "
+               f"tetőzött, {cs} MW-tal.")
+    if mg.get("szel_mai_atlag_mw") is not None:
+        sor += f" A napi átlag {_ezres(mg['szel_mai_atlag_mw'])} MW."
+    return {"sor": sor, "szam": f"{cs} MW", "cimke": "mai széltermelési csúcs"}
+
+
 def sablon_uzenetek(f):
     """Élő megállapítások, tárgyilagos megfogalmazásban."""
     u = [{"sor": KOSZONTO, "szam": None, "cimke": None}]
@@ -589,11 +822,35 @@ def sablon_uzenetek(f):
 
     if fo and fo.get("elorejelzett_csucs_mwh"):
         csucs = _ezres(fo["elorejelzett_csucs_mwh"])
-        u.append({
-            "sor": f"A CatBoost modell előrejelzése szerint a legmagasabb terhelés "
-                   f"várhatóan {_ora_sav(fo['csucs_idopont'])} között alakulhat ki, a "
-                   f"fogyasztás csúcsértéke pedig megközelítheti a {csucs} MWh-t.",
-            "szam": f"{csucs} MWh", "cimke": "előrejelzett csúcsterhelés"})
+        if fo.get("aktualis_ora_mwh"):
+            # A látogatót elsősorban az érdekli, MOST mit mond a modell. A napi
+            # csúcs csak akkor kerül előre, ha még hátravan; éjjel a már elmúlt
+            # csúcsot előretenni félrevezető volt.
+            akt = _ezres(fo["aktualis_ora_mwh"])
+            sor = (f"A CatBoost modell a most futó órára {akt} MWh országos "
+                   f"fogyasztást jelez.")
+            # Az `_ora_sav` maga kiírja a "holnap" szót, ha az időpont nem mai —
+            # ezért a "holnapi" jelzőt csak akkor tesszük ki, ha ott nem hangzik el.
+            nap_szo = "A mai csúcs" if fo.get("csucs_ma_van") else "A csúcs"
+            if fo.get("csucs_meg_hatravan"):
+                sor += (f" {nap_szo} {_ora_sav(fo['csucs_idopont'])} között "
+                        f"várható, {csucs} MWh körül.")
+            else:
+                sor += (f" {nap_szo} {_ido(fo['csucs_idopont'])} körül volt, "
+                        f"{csucs} MWh.")
+            u.append({"sor": sor, "szam": f"{akt} MWh",
+                      "cimke": "előrejelzés a jelen órára"})
+        elif fo.get("csucs_meg_hatravan"):
+            u.append({
+                "sor": f"A CatBoost modell előrejelzése szerint a legmagasabb terhelés "
+                       f"várhatóan {_ora_sav(fo['csucs_idopont'])} között alakulhat ki, a "
+                       f"fogyasztás csúcsértéke pedig megközelítheti a {csucs} MWh-t.",
+                "szam": f"{csucs} MWh", "cimke": "előrejelzett csúcsterhelés"})
+        else:
+            u.append({
+                "sor": f"A csúcsterhelés {_ido(fo['csucs_idopont'])} körül alakult "
+                       f"ki, {csucs} MWh értéken.",
+                "szam": f"{csucs} MWh", "cimke": "csúcsterhelés"})
         if ho is not None and ho >= 35:
             u.append({
                 "sor": "Amennyiben megoldható, a halasztható nagyobb fogyasztásokat "
@@ -609,37 +866,22 @@ def sablon_uzenetek(f):
                         f"elmarad az ugyanezekre az órákra jellemző heti átlagtól."),
                 "szam": f"{sz_el:+.0f}%", "cimke": "eltérés a heti átlagtól"})
 
+    teg = _tegnap_mondat(f)
+    if teg:
+        u.append(teg)
+
     if ho is not None:
-        u.append({
-            "sor": f"A budapesti mért hőmérséklet jelenleg {ho:.0f} °C, ami a hűtési "
-                   f"igényen keresztül közvetlenül befolyásolja a rendszerterhelést.",
-            "szam": f"{ho:.0f} °C", "cimke": "mért hőmérséklet · Budapest"})
+        u.append({"sor": _ho_mondat(ho, f), "szam": f"{ho:.0f} °C",
+                  "cimke": "mért hőmérséklet · Budapest"})
 
     mg = f.get("megujulok")
-    if mg and mg.get("nap_hatralevo_csucs_mw"):
-        cs = _ezres(mg["nap_hatralevo_csucs_mw"])
-        u.append({
-            "sor": f"A napenergia-termelés a mai nap hátralévő részében várhatóan "
-                   f"{cs} MW körüli csúcsértéket érhet el.",
-            "szam": f"{cs} MW", "cimke": "hátralévő napenergia-csúcs"})
-    elif mg and mg.get("nap_termeles_mara_lezarult"):
-        tetoz = mg.get("nap_mai_tetozes_mw") or mg.get("nap_mai_csucs_mw")
-        if tetoz:
-            cs = _ezres(tetoz)
-            sor = f"A napelemes termelés mára lecsengett; a mai tetőzés {cs} MW volt."
-            # A holnapi terv KÜLÖN mondatban, egyértelmű címkével — sosem
-            # keveredhet össze a mai értékkel.
-            if mg.get("nap_holnapi_csucs_mw"):
-                sor += (f" A napelőtti terv szerint holnap "
-                        f"{_ezres(mg['nap_holnapi_csucs_mw'])} MW körüli csúcs várható.")
-            u.append({"sor": sor, "szam": f"{cs} MW", "cimke": "mai napenergia-tetőzés"})
+    nap_sor = _nap_mondat(mg)
+    if nap_sor:
+        u.append(nap_sor)
 
-    if mg and mg.get("szel_mai_atlag_mw") is not None:
-        atl_szel = _ezres(mg["szel_mai_atlag_mw"])
-        u.append({
-            "sor": f"A széltermelés mai átlaga a napelőtti terv szerint {atl_szel} MW, "
-                   f"a napi csúcs {_ezres(mg.get('szel_mai_csucs_mw') or 0)} MW.",
-            "szam": f"{atl_szel} MW", "cimke": "mai átlagos széltermelés"})
+    szel_sor = _szel_mondat(mg)
+    if szel_sor:
+        u.append(szel_sor)
 
     m = f.get("modell_pontossag")
     elso = (m or {}).get("catboost_elso_jóslat_mae_mwh")
@@ -676,28 +918,64 @@ def sablon_uzenetek(f):
 # 5) GEMINI + ELLENŐRZÉS
 # ============================================================
 
-def _gemini(prompt, sema, timeout=GEMINI_TIMEOUT):
+class GeminiKvotaHiba(RuntimeError):
+    """Elfogyott a nyelvi modell kerete (HTTP 429 / RESOURCE_EXHAUSTED).
+
+    Ez nem programhiba, hanem átmeneti állapot: a keret idővel újratöltődik.
+    Ezért külön típus — a látogatónak őszintén megmondjuk, ahelyett hogy
+    Flux csak szűkszavúbbá válna minden magyarázat nélkül."""
+
+
+class GeminiLassuHiba(RuntimeError):
+    """A nyelvi modell nem válaszolt időben."""
+
+
+def _gemini(prompt, sema, timeout=GEMINI_TIMEOUT, szerep=None, homerseklet=0.4):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY nincs beállítva")
+    if _kvota_blokkolt():
+        # Meg sem próbáljuk: a hívás úgyis 429-cel jönne vissza, viszont a
+        # látogatónak addig is várnia kellene rá.
+        raise GeminiKvotaHiba("a keret betelt, a hívás kihagyva")
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{GEMINI_MODEL}:generateContent")
-    r = requests.post(
-        url,
-        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-        json={
-            "system_instruction": {"parts": [{"text": FLUX_SZEREP}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.4,
-                "responseMimeType": "application/json",
-                "responseSchema": sema,
+    try:
+        r = requests.post(
+            url,
+            headers={"x-goog-api-key": GEMINI_API_KEY,
+                     "Content-Type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": szerep or FLUX_SZEREP}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": homerseklet,
+                    "responseMimeType": "application/json",
+                    "responseSchema": sema,
+                },
             },
-        },
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    reszek = r.json()["candidates"][0]["content"]["parts"]
-    return json.loads("".join(p.get("text", "") for p in reszek))
+            timeout=timeout,
+        )
+    except requests.exceptions.Timeout as e:
+        raise GeminiLassuHiba(f"Gemini időtúllépés ({timeout} mp)") from e
+    if r.status_code != 200:
+        # A Google a hiba OKÁT a válasz törzsében küldi (rossz kulcs, nem
+        # létező modellnév, kimerült kvóta). A puszta `raise_for_status()`
+        # ezt eldobta, ezért a naplóban csak egy szám látszott, és nem
+        # lehetett megmondani, miért hallgat Flux.
+        torzs = r.text[:400]
+        if r.status_code == 429 or "RESOURCE_EXHAUSTED" in torzs:
+            _kvota_jelez()
+            raise GeminiKvotaHiba(f"Gemini kvóta: {torzs}")
+        raise RuntimeError(f"Gemini HTTP {r.status_code}: {torzs}")
+    valasz_json = r.json()
+    jeloltek = valasz_json.get("candidates") or []
+    if not jeloltek:
+        raise RuntimeError(f"Gemini üres válasz: {str(valasz_json)[:400]}")
+    reszek = jeloltek[0].get("content", {}).get("parts") or []
+    szoveg = "".join(p.get("text", "") for p in reszek)
+    if not szoveg.strip():
+        raise RuntimeError(f"Gemini nem adott szöveget: {str(jeloltek[0])[:400]}")
+    return json.loads(szoveg)
 
 
 _UZENET_SEMA = {
@@ -793,16 +1071,23 @@ def _ellenoriz(uzenetek, f):
 # 6) BELÉPÉSI PONT — ezt hívja az app.py
 # ============================================================
 
-def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
+def uzenetek(data, ajanlas=None, koszonto=None):
     """A főoldali Flux-szövegek. Sosem dob kivételt: hiba esetén sablonra vált."""
     f, minoseg = tenyek(data, ajanlas)
     if f is None:
         return [{"sor": "Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
                  "szam": None, "cimke": None}]
 
+    # Alapertelmezesben elo koszonto keszul: napszak szerinti koszones es a
+    # pontos ido. A hivo felulirhatja sajat szoveggel.
+    koszonto = koszonto or elo_koszonto()
+
     tartalek = sablon_uzenetek(f) + MODELL_UZENETEK + ZARO_UZENETEK
     if koszonto:
-        tartalek[0] = {"sor": koszonto, "szam": None, "cimke": None}
+        # A "kezdo" jelzés miatt a böngésző a köszöntőt EGYSZER játssza le,
+        # utána kihagyja a körből. Eddig minden fordulóban újrakezdte a
+        # "Szia, Flux vagyok..." mondattal, ami ismétlődőnek és gépiesnek hatott.
+        tartalek[0] = {"sor": koszonto, "szam": None, "cimke": None, "kezdo": True}
 
     fh = _hash(f)
     ck = _cache_key(fh)
@@ -823,6 +1108,23 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
         except Exception as e:
             print(f"[FLUX] Gyorsítótár olvasás: {e}", flush=True)
 
+    # Egyszerre csak egy szál gyárt. A zár NEM várakozó: ha épp más látogató
+    # hívása fut, ez a látogató azonnal megkapja a determinisztikus szöveget,
+    # ahelyett hogy akár 12 másodpercet várna valaki más Gemini-hívása mögött.
+    # A következő oldalletöltés már a kész, gazdagabb változatot kapja.
+    if not _GYARTAS_LOCK.acquire(blocking=False):
+        return tartalek
+    try:
+        kesz = _memo_olvas(ck)
+        if kesz is not None:
+            return kesz
+        return _gyart(f, ck, fh, minoseg, koszonto, tartalek)
+    finally:
+        _GYARTAS_LOCK.release()
+
+
+def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
+    """A főoldali szöveg tényleges legyártása. Csak a `_GYARTAS_LOCK` alatt fut."""
     allapot, model_nev, hibak = "fallback", "deterministic-template-v1", []
     vegleges = tartalek
 
@@ -877,7 +1179,8 @@ def uzenetek(data, ajanlas=None, koszonto=KOSZONTO):
         valasz_json = _gemini(prompt, _UZENET_SEMA)
         jo, hibak = _ellenoriz(valasz_json.get("uzenetek", []), f)
         if len(jo) >= 2:
-            vegleges = (([{"sor": koszonto, "szam": None, "cimke": None}] if koszonto else [])
+            vegleges = (([{"sor": koszonto, "szam": None, "cimke": None,
+                           "kezdo": True}] if koszonto else [])
                         + jo + MODELL_UZENETEK + ZARO_UZENETEK)
             allapot, model_nev = "gemini", GEMINI_MODEL
         else:
@@ -918,6 +1221,23 @@ def _u(sor, szam=None, cimke=None):
 
 # Témák: (kulcsszavak, kezelő függvény neve). A sorrend számít — az első
 # egyező téma nyer, ezért a specifikusabb kulcsszavak állnak elöl.
+def _t_udvozles(f):
+    """Ha a látogató köszön vagy megszólít, Flux visszaköszön — napszak
+    szerint —, és rögtön felajánl valamit, amiről kérdezhet."""
+    kep = _t_kepessegek(f)
+    sor = f"{_udvozles()} Örülök, hogy benéztél. "
+    if kep:
+        sor += kep["sor"]
+    else:
+        sor += "Amint megérkeznek az élő adatok, mondom, mi történik."
+    return _u(sor, None, "amiről kérdezhetsz")
+
+
+def _t_koszonom(f):
+    return _u("Szívesen! Ha bármi mást is meg akarsz nézni, csak kérdezz.",
+              None, None)
+
+
 def _t_kepessegek(f):
     temak = []
     if f.get("dam") or f.get("toltes"):
@@ -1007,11 +1327,19 @@ def _t_fogyasztas(f):
                       f"{_ezres(mert['ertek_mwh'])} MWh", "legutóbbi mért fogyasztás")
         return None
     csucs = _ezres(fo["elorejelzett_csucs_mwh"])
-    sor = (f"A CatBoost V10 modell a következő {fo['orak_szama']} órára jelez előre. "
-           f"A legmagasabb terhelés {_ora_sav(fo['csucs_idopont'])} között várható, "
-           f"a csúcsérték {csucs} MWh.")
+    # A kérdésre a JELEN órával kezdünk — a látogatót az érdekli, most mi van.
     if fo.get("aktualis_ora_mwh"):
-        sor += f" A most futó órára {_ezres(fo['aktualis_ora_mwh'])} MWh a jóslat."
+        sor = (f"A CatBoost V10 modell a most futó órára "
+               f"{_ezres(fo['aktualis_ora_mwh'])} MWh országos fogyasztást jelez.")
+        if fo.get("csucs_meg_hatravan"):
+            sor += (f" A csúcs {_ora_sav(fo['csucs_idopont'])} között várható, "
+                    f"{csucs} MWh.")
+        else:
+            sor += f" A csúcs {_ido(fo['csucs_idopont'])} körül volt, {csucs} MWh."
+    else:
+        sor = (f"A CatBoost V10 modell a következő {fo['orak_szama']} órára jelez előre. "
+               f"A legmagasabb terhelés {_ora_sav(fo['csucs_idopont'])} között várható, "
+               f"a csúcsérték {csucs} MWh.")
     sz_el = fo.get("elteres_heti_atlagtol_szazalek")
     if sz_el is not None and abs(sz_el) >= 1:
         irany = "meghaladja" if sz_el > 0 else "elmarad"
@@ -1022,52 +1350,32 @@ def _t_fogyasztas(f):
 
 def _t_napenergia(f):
     mg = f.get("megujulok") or {}
-    if not mg:
-        return None
-    # A MAI, hátralévő órákra vonatkozó csúcs — csak ha tényleg van még hátra.
-    if mg.get("nap_hatralevo_csucs_mw"):
-        cs = _ezres(mg["nap_hatralevo_csucs_mw"])
-        sor = (f"A napelemes termelés a mai nap hátralévő részében várhatóan {cs} MW "
-               f"körüli csúcsot érhet el.")
-        if mg.get("nap_eddigi_merte_csucs_mw"):
-            sor += (f" A ma eddig mért legmagasabb érték "
-                    f"{_ezres(mg['nap_eddigi_merte_csucs_mw'])} MW volt.")
-        return _u(sor, f"{cs} MW", "hátralévő napenergia-csúcs")
-
-    # A mai termelés lezárult: KIZÁRÓLAG múlt idő, és a holnapi terv külön mondatban.
-    tetoz = mg.get("nap_mai_tetozes_mw") or mg.get("nap_mai_csucs_mw")
-    if tetoz:
-        cs = _ezres(tetoz)
-        sor = f"A mai napelemes termelés már lecsengett, a nap tetőzése {cs} MW volt."
-        if mg.get("nap_eddigi_merte_csucs_mw"):
-            sor += (f" A ténylegesen mért napi maximum "
-                    f"{_ezres(mg['nap_eddigi_merte_csucs_mw'])} MW.")
+    alap = _nap_mondat(mg)
+    if not alap:
         if mg.get("nap_holnapi_csucs_mw"):
-            sor += (f" Holnapra a napelőtti terv "
-                    f"{_ezres(mg['nap_holnapi_csucs_mw'])} MW körüli csúcsot jelez.")
-        return _u(sor, f"{cs} MW", "mai napenergia-tetőzés")
-    if mg.get("nap_holnapi_csucs_mw"):
-        cs = _ezres(mg["nap_holnapi_csucs_mw"])
-        return _u(f"A holnapi napra a napelőtti terv {cs} MW körüli napelemes csúcsot "
-                  f"jelez.", f"{cs} MW", "holnapi napenergia-csúcs")
-    return None
+            cs = _ezres(mg["nap_holnapi_csucs_mw"])
+            return _u(f"A holnapi napra a napelőtti terv {cs} MW körüli napelemes "
+                      f"csúcsot jelez.", f"{cs} MW", "holnapi napenergia-csúcs")
+        return None
+    # Kérdésre a mért értéket is hozzátesszük, ha van — az a "mi történik MOST".
+    if mg.get("nap_eddigi_merte_csucs_mw"):
+        alap = dict(alap)
+        alap["sor"] += (f" A ma ténylegesen mért legmagasabb érték "
+                        f"{_ezres(mg['nap_eddigi_merte_csucs_mw'])} MW.")
+    return alap
 
 
 def _t_szel(f):
     mg = f.get("megujulok") or {}
-    if mg.get("szel_mai_csucs_mw") is None:
+    alap = _szel_mondat(mg)
+    if not alap:
         return None
-    cs = _ezres(mg["szel_mai_csucs_mw"])
-    sor = f"A széltermelés mai csúcsa a napelőtti terv szerint {cs} MW."
-    if mg.get("szel_mai_atlag_mw") is not None:
-        sor += f" A mai napi átlag {_ezres(mg['szel_mai_atlag_mw'])} MW."
     if mg.get("szel_utolso_mert_mw") is not None:
-        sor += (f" A legutóbb mért érték {_ezres(mg['szel_utolso_mert_mw'])} MW "
-                f"{_ido(mg.get('szel_utolso_mert_idopont'))}-kor.")
-    elif mg.get("szel_hatralevo_csucs_mw") is not None:
-        sor += (f" A nap hátralévő részében {_ezres(mg['szel_hatralevo_csucs_mw'])} MW "
-                f"a várható maximum.")
-    return _u(sor, f"{cs} MW", "mai széltermelési csúcs")
+        alap = dict(alap)
+        alap["sor"] += (f" A legutóbb mért érték "
+                        f"{_ezres(mg['szel_utolso_mert_mw'])} MW "
+                        f"{_ido(mg.get('szel_utolso_mert_idopont'))}-kor.")
+    return alap
 
 
 def _t_megujulo_pontossag(f):
@@ -1092,13 +1400,12 @@ def _t_homerseklet(f):
     if ho is None and not ido:
         return None
     if ho is not None:
-        sor = (f"A budapesti mért hőmérséklet most {ho:.0f} °C, ami a fűtési és hűtési "
-               f"igényen keresztül közvetlenül hat a rendszerterhelésre.")
+        sor = _ho_mondat(ho, f)
     else:
         sor = "A budapesti hőmérsékletről ma a következőket mutatják az adatok."
-    if ido.get("mai_max_c") is not None:
-        sor += (f" A mai napi maximum {ido['mai_max_c']:.0f} °C, a minimum "
-                f"{ido['mai_min_c']:.0f} °C.")
+        if ido.get("mai_max_c") is not None:
+            sor += (f" A mai napi maximum {ido['mai_max_c']:.0f} °C, a minimum "
+                    f"{ido['mai_min_c']:.0f} °C.")
     if ido.get("holnapi_max_c") is not None:
         sor += f" Holnap {ido['holnapi_max_c']:.0f} °C-os csúcs várható."
     return _u(sor, f"{ho:.0f} °C" if ho is not None else None,
@@ -1174,6 +1481,21 @@ def _t_mert_fogyasztas(f):
               "legutóbbi mért fogyasztás")
 
 
+def _t_tegnap(f):
+    return _tegnap_mondat(f)
+
+
+def _t_ido_most(f):
+    """"Hány óra van?" / "milyen napszak van?" — ettől látszik, hogy Flux
+    tudja, mikor nézi valaki az oldalt."""
+    meta = f.get("_meta") or {}
+    if not meta.get("helyi_ido"):
+        return None
+    return _u(f"Most {meta['helyi_ido']} van Budapesten, {meta.get('napszak')}. "
+              f"Minden időpont, amit mondok, budapesti idő szerint értendő.",
+              meta["helyi_ido"], "pontos idő · Budapest")
+
+
 def _t_frissites(f):
     meta = f.get("_meta") or {}
     if not meta.get("frissites"):
@@ -1188,6 +1510,9 @@ def _t_frissites(f):
 
 # A sorrend számít: a specifikusabb minta áll elöl.
 _TEMAK = [
+    (("köszönöm", "köszi", "kösz ", "hálás"), _t_koszonom),
+    (("szia", "helló", "hello", "hali", "jó reggelt", "jó estét", "jó napot",
+      "üdv", "csá"), _t_udvozles),
     (("mit tudsz", "miben tudsz", "mire vagy", "ki vagy", "mit csinálsz", "segít",
       "miről tudsz", "mit kérdez", "mihez értesz", "mi ez az oldal"), _t_kepessegek),
     (("holnapi ár", "holnap ár", "holnapi day", "holnapi dam", "holnap mennyi lesz az ár",
@@ -1202,6 +1527,10 @@ _TEMAK = [
       "mennyire pontos", "gépi tanul", "mesterséges intelligencia"), _t_modell),
     (("anomál", "szokatlan", "stl", "adatminőség", "eltérés a szokásos", "rendellenes",
       "nyitott eset"), _t_anomalia),
+    (("tegnap", "tegnapi", "előző nap", "tegnaphoz", "elmúlt naphoz",
+      "mennyivel nőtt", "mennyivel csökkent", "változott a fogyaszt"), _t_tegnap),
+    (("hány óra", "mennyi az idő", "milyen napszak", "éjszaka van", "nappal van",
+      "pontos idő"), _t_ido_most),
     (("mért fogyasztás", "aktuális fogyasztás", "most mennyi a fogyasztás"),
      _t_mert_fogyasztas),
     (("fogyaszt", "terhel", "csúcs", "mwh", "mennyit fogyaszt", "rendszerterhel"),
@@ -1236,7 +1565,7 @@ def _sajat_valasz(kerdes, f):
     return None
 
 
-def valasz(kerdes, data, ajanlas=None):
+def valasz(kerdes, data, ajanlas=None, kontextus=None):
     """A látogató kérdésére adott egyetlen válasz.
 
     Sorrend: (1) determinisztikus válasz a témára, (2) Gemini, ha átmegy az
@@ -1250,36 +1579,90 @@ def valasz(kerdes, data, ajanlas=None):
                   "a nap- és széltermelésről, az időjárásról vagy a modell pontosságáról "
                   "is tudok beszélni.", None, "amiről kérdezhetsz")
 
+    # 0) Ugyanarra a kérdésre, ugyanabban az adatállapotban ne hívjuk újra a
+    # modellt. Több látogató jellemzően ugyanazt kérdezi, és a kvóta közös.
+    valasz_kulcs = f"{_hash(f)}:{' '.join(str(kerdes).lower().split())[:120]}"
+    tarolt = None
+    with _MEMO_LOCK:
+        rec = _VALASZ_MEMO.get(valasz_kulcs)
+        if rec and rec["lejar"] > time.time():
+            tarolt = rec["ertek"]
+        elif rec:
+            _VALASZ_MEMO.pop(valasz_kulcs, None)
+    if tarolt is not None:
+        return tarolt
+
     # 1) A biztos válasz azonnal kész — erre mindig van mit visszaadni.
     biztos = _sajat_valasz(kerdes, f)
+    if biztos is None and kontextus:
+        # "És ez?" — a kérdés a képernyőn olvasott mondatra utal vissza.
+        # Ilyenkor a téma AZ olvasott mondatból derül ki, nem a kérdésből.
+        biztos = _sajat_valasz(kontextus, f)
+    if biztos is None:
+        # Naplózzuk, mire nem találtunk témát — ebből bővíthető a kulcsszólista.
+        print(f"[FLUX] Nem talált témát a kérdésre: {str(kerdes)[:120]!r}", flush=True)
 
     # 2) A Gemini csak akkor kerül a helyére, ha valóban jobb és hiteles.
+    # Ha átmeneti okból (kvóta, lassúság) nem sikerül, ezt a látogató is
+    # megtudja — a válasz elé kerül egy rövid, őszinte mondat.
+    elonezet = ""
     try:
+        meta = f.get("_meta") or {}
         prompt = (
+            f"Most {meta.get('helyi_ido')} van Budapesten, tehát "
+            f"{meta.get('napszak')} van. Ehhez igazítsd a hangnemet és az igeidőket.\n\n"
             "Élő adatok:\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
-            f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
-            "Válaszolj EGY megállapítással ugyanabban a formában "
-            "('sor', 'szam', 'cimke'). Használd a 'megujulok', 'fogyasztas', 'dam', "
+            + (f"A látogató ÉPPEN EZT a megállapítást olvasta a képernyőn, "
+               f"amikor kérdezett: \"{str(kontextus).strip()[:300]}\"\n"
+               f"Ha a kérdés visszautal rá ('ez', 'erről', 'miért'), erre "
+               f"vonatkozik.\n\n" if kontextus else "")
+            + f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
+            "Válaszolj EGY elemmel a megadott formában. A 'sor' a beszélgető "
+            "válasz (2-3 mondat), a 'szam' egyetlen kiemelt érték mértékegységgel "
+            "az adatokból, a 'cimke' 2-5 szóban megmondja, mi az a szám. "
+            "Használhatod a 'megujulok', 'fogyasztas', 'tegnapi_osszevetes', 'dam', "
             "'toltes', 'kartyak', 'idojaras', 'modell_pontossag', 'heti_merleg', "
-            "'stl' és 'adatminoseg' mezőket. "
-            "Ha az időpont nem mai, írd ki, hogy holnapi. "
-            "NAPELEM: a 'nap_hatralevo_csucs_mw' a MAI hátralévő órákra vonatkozik; ha "
-            "'nap_termeles_mara_lezarult' szerepel, a mai termelésről CSAK múlt időben "
-            "beszélhetsz; a 'nap_holnapi_csucs_mw' a HOLNAPI terv, ezt mindig nevezd "
-            "meg holnapiként. "
+            "'stl' és 'adatminoseg' mezőket.\n"
+            "IDŐ: ha egy időpont nem a mai napra esik, írd ki, hogy holnapi.\n"
+            "NAPELEM: a 'nap_csucs_meg_hatravan' megmondja, hogy a mai csúcs még "
+            "hátravan-e. Ha 'nap_termeles_mara_lezarult' szerepel, a mai termelésről "
+            "CSAK múlt időben beszélhetsz; a 'nap_holnapi_csucs_mw' a HOLNAPI terv, "
+            "ezt mindig nevezd meg holnapiként.\n"
             "Csak akkor mondd, hogy nem tudsz válaszolni, ha a kérdés témájához "
             "TÉNYLEG nincs mező az adatokban."
         )
-        v = _gemini(prompt, _UZENET_SEMA, timeout=GEMINI_KERDES_TIMEOUT)
+        v = _gemini(prompt, _UZENET_SEMA, timeout=GEMINI_KERDES_TIMEOUT,
+                    szerep=FLUX_SZEREP_KERDES, homerseklet=0.7)
         jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
         if jo:
+            _valasz_memo_ir(valasz_kulcs, jo[0])
             return jo[0]
         print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
+    except GeminiKvotaHiba as e:
+        # Ez nem hiba, hanem átmeneti állapot — a látogató megérdemli, hogy
+        # megtudja, miért lett Flux hirtelen szűkszavú.
+        print(f"[FLUX] Kérdés — kvóta: {e}", flush=True)
+        elonezet = ("Most épp betelt a nyelvi modell kerete, úgyhogy tömörebben "
+                    "fogalmazok — amint újratöltődik, megint bővebben válaszolok. "
+                    "Az adatok viszont ugyanúgy élők: ")
+    except GeminiLassuHiba as e:
+        print(f"[FLUX] Kérdés — lassú: {e}", flush=True)
+        elonezet = ("A nyelvi modell most lassan felel, ezért röviden mondom, "
+                    "de az adatok élők: ")
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
 
     if biztos:
+        if elonezet:
+            biztos = dict(biztos)
+            # A magyarázó mondat után a saját mondat kisbetűvel folytatódik.
+            sor = biztos["sor"]
+            biztos["sor"] = elonezet + (sor[0].lower() + sor[1:] if sor else sor)
+        else:
+            # Csak a "tiszta" választ tesszük el. A kvóta- vagy lassúság-jelzés
+            # átmeneti állapotot ír le, azt nem szabad 10 percre bebetonozni.
+            _valasz_memo_ir(valasz_kulcs, biztos)
         return biztos
 
     # 3) Nem találtunk témát: ne egy üres "nem tudom" menjen ki, hanem az,
@@ -1290,3 +1673,20 @@ def valasz(kerdes, data, ajanlas=None):
                   + kepessegek["sor"], None, "amiről kérdezhetsz")
     return _u("Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre pontos "
               "válasz.")
+
+
+# ============================================================
+# 8) INDULÁSI DIAGNOSZTIKA
+#
+# Ebből a Render naplójában egy pillantással látszik, hogy a Gemini
+# egyáltalán be van-e kötve. Ha a kulcs hiányzik vagy a modellnév rossz,
+# Flux némán a determinisztikus válaszokra esik vissza — ez a sor mondja
+# meg, hogy melyik eset áll fenn.
+# ============================================================
+print(
+    f"[FLUX] Indulás — Gemini kulcs: "
+    f"{'BEÁLLÍTVA (' + str(len(GEMINI_API_KEY)) + ' karakter)' if GEMINI_API_KEY else 'HIÁNYZIK'}"
+    f" | modell: {GEMINI_MODEL}"
+    f" | adatbázis: {'igen' if _db_ok() else 'nem'}",
+    flush=True,
+)
