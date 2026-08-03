@@ -1,4 +1,5 @@
 import dash
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dash import html, dcc, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
@@ -9,6 +10,7 @@ import joblib
 import requests
 import os
 import time
+import threading
 import math
 from datetime import datetime, timedelta
 from io import StringIO
@@ -2761,4 +2763,3 @@ if __name__=="__main__":
     port = int(os.environ.get("PORT", 8050))
     debug = os.environ.get("DASH_DEBUG", "false").lower() == "true"
     app.run(debug=debug, host="0.0.0.0", port=port)
-
