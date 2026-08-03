@@ -22,6 +22,7 @@
   const st = {
     i: 0, k: 0, utolso: 0, varakozasKezdet: 0,
     valaszKulcs: null, valaszAktiv: false, varakozott: false,
+    kezdoLatott: false, korPozicio: 0,
   };
 
   const el = (id) => document.getElementById(id);
@@ -32,7 +33,12 @@
 
   function lista() {
     const d = window.FLUX_DATA || {};
-    const uz = Array.isArray(d.uzenetek) ? d.uzenetek : [];
+    let uz = Array.isArray(d.uzenetek) ? d.uzenetek : [];
+
+    /* A köszöntő EGYSZER megy le, utána kikerül a körből. Korábban minden
+       fordulóban — és minden válasz után azonnal — újrakezdte a
+       "Szia, Flux vagyok..." mondattal az egész felsorolást. */
+    if (st.kezdoLatott) uz = uz.filter((m) => !m.kezdo);
 
     /* A kérdés elküldése és a válasz megérkezése között akár néhány másodperc
        is eltelhet (a szerver ilyenkor kérdezi meg az élő adatokat). Ha ez alatt
@@ -53,6 +59,7 @@
       if (st.valaszKulcs !== kulcs) {
         st.valaszKulcs = kulcs;
         st.valaszAktiv = true;
+        st.korPozicio = st.i;   // hova térjünk vissza a válasz után
         ujrakezd();
       }
       if (st.valaszAktiv) return [d.valasz].concat(uz);
@@ -79,13 +86,22 @@
     } else if (most - st.varakozasKezdet >= kitartas(sor)) {
       st.varakozasKezdet = 0;
       st.k = 0;
-      if (st.valaszAktiv) { st.valaszAktiv = false; st.i = 0; }
-      else { st.i = (st.i + 1) % l.length; }
+      if (uz.kezdo) st.kezdoLatott = true;
+      if (st.valaszAktiv) {
+        /* A válasz után OTT folytatjuk, ahol a kör tartott — nem ugrunk
+           vissza a lista elejére, tehát nem indul újra a köszöntővel. */
+        st.valaszAktiv = false;
+        st.i = st.korPozicio;
+      } else {
+        st.i = st.i + 1;
+      }
       return;
     }
 
     const reszlet = sor.slice(0, st.k);
     if (szoveg.textContent !== reszlet) szoveg.textContent = reszlet;
+    // Amit a látogató ÉPPEN lát — ez megy el a kérdéssel együtt a szervernek.
+    if (!window.FLUX_VARAKOZAS) window.FLUX_AKTUALIS = sor;
 
     const kesz = st.k >= sor.length;
     const szam = el("flux-szam");
@@ -100,12 +116,37 @@
     if (doboz) doboz.style.display = ertek ? "flex" : "none";
   }
 
+  /* Amíg a látogató a kérdés-mezőben van, a szöveg MEGÁLL azon a
+     megállapításon, amit éppen olvas. Enélkül mire megfogalmazta a kérdést,
+     Flux már két témával odébb járt, és a kérdés a semmire vonatkozott. */
+  function szunetel() {
+    const mezo = el("flux-kerdes");
+    if (!mezo) return false;
+    if (document.activeElement === mezo) return true;
+    return !!(mezo.value && mezo.value.trim());
+  }
+
   function hurok(most) {
-    try { lepes(most); } catch (e) { /* az oldal ettől ne álljon meg */ }
+    try {
+      if (szunetel()) {
+        /* Megállunk, de a félbehagyott mondatot végiggépeljük, hogy ne
+           csonka szöveg maradjon a képernyőn. */
+        const l = lista();
+        const uz = l[Math.min(st.i, l.length - 1)] || {};
+        const sor = uz.sor || "";
+        if (st.k < sor.length) lepes(most);
+        else { st.varakozasKezdet = most; lepes(most); }
+      } else {
+        lepes(most);
+      }
+    } catch (e) { /* az oldal ettől ne álljon meg */ }
     requestAnimationFrame(hurok);
   }
 
   window.fluxIndit = function () { window.FLUX_VARAKOZAS = false; };
   window.fluxVarakozas = function () { window.FLUX_VARAKOZAS = true; };
+  /* A szerver ezt kapja meg a kérdéssel együtt: így tudja, MELYIK
+     megállapításra vonatkozik az "és ez mit jelent?" típusú kérdés. */
+  window.fluxAktualis = function () { return window.FLUX_AKTUALIS || ""; };
   requestAnimationFrame(hurok);
 })();
