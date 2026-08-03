@@ -1174,11 +1174,12 @@ def kep(fajlnev, alt, className=None, style=None):
     Ugyanezek WebP-ben 151 KB-ot foglalnak. A `<picture>` elem miatt a modern
     böngésző CSAK a WebP-t tölti le; ha valamelyik régi böngésző nem ismeri,
     az eredeti PNG-t kapja, tehát senkinél nem marad üres a hely."""
-    torzs = fajlnev.rsplit(".", 1)[0]
-    return html.Picture([
-        html.Source(srcSet=f"/assets/{torzs}.webp", type="image/webp"),
-        html.Img(src=f"/assets/{fajlnev}", alt=alt, className=className, style=style),
-    ])
+    # FIGYELEM: a `<picture>` NEM esik vissza az `<img>`-re, ha a `<source>`
+    # típusa támogatott, de a fájl 404. Ezért a WebP-változat csak akkor
+    # kapcsolható be, ha mind a 8 .webp tényleg ott van az assets mappában.
+    # Amíg nincs, marad az eredeti PNG — az mindig működik.
+    return html.Img(src=dash.get_asset_url(fajlnev), alt=alt,
+                    className=className, style=style)
 
 
 def kpi(cim, val, sub, szin, trend=None, jelolt_i=None):
