@@ -509,6 +509,14 @@ def model_predict(X_df):
 # ============================================================
 CACHE = {}
 
+# A LESZÁRMAZTATOTT csomag gyorsítótára. A `CACHE` a nyers forrásokat őrzi,
+# ez pedig a belőlük kiszámolt végeredményt: jóslat, STL, validáció. Amíg a
+# bemenet ujjlenyomata változatlan, egyetlen látogató sem fizeti ki újra a
+# CatBoost-futást, a robusztus STL-bontást és a négy adatbázis-kört.
+SZAMITAS_CACHE = {"ujjlenyomat": None, "ido": 0.0, "csomag": None}
+SZAMITAS_TTL = 900          # 15 perc: ennyinél frissebb marad a validációs sáv
+SZAMITAS_LOCK = threading.Lock()
+
 def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
     most = time.time()
     rec = CACHE.get(kulcs)
@@ -597,11 +605,11 @@ def get_ho():
             d = r.json()
             if "current_weather" not in d:
                 print(f"[HIBA] Open-Meteo (hőmérséklet) {kiserlet+1}. — HTTP {r.status_code}: {str(d)[:150]}", flush=True)
-                time.sleep(3); continue
+                time.sleep(1.0); continue
             return float(d["current_weather"]["temperature"]),True
         except Exception as e:
             print(f"[HIBA] Open-Meteo (hőmérséklet) {kiserlet+1}.: {e}", flush=True)
-            time.sleep(3)
+            time.sleep(1.0)
     return None,False
 
 def get_ho_vc():
@@ -642,7 +650,7 @@ def get_idojaras():
             d = r.json()
             if "hourly" not in d:
                 print(f"[HIBA] Open-Meteo (előrejelzés) {kiserlet+1}. — HTTP {r.status_code}: {str(d)[:150]}", flush=True)
-                time.sleep(3); continue
+                time.sleep(1.0); continue
             hourly = pd.DataFrame({"Datum":pd.to_datetime(d["hourly"]["time"]),
                 "Homerseklet_C":d["hourly"]["temperature_2m"],
                 "Paratartalom_szazalek":d["hourly"]["relative_humidity_2m"],
@@ -653,11 +661,11 @@ def get_idojaras():
                      "min":d["daily"]["temperature_2m_min"][2:6],
                      "code":d["daily"]["weathercode"][2:6]}
             if len(hourly) < 72:
-                time.sleep(3); continue
+                time.sleep(1.0); continue
             return hourly,daily,True
         except Exception as e:
             print(f"[HIBA] Open-Meteo (előrejelzés) {kiserlet+1}.: {e}", flush=True)
-            time.sleep(3)
+            time.sleep(1.0)
     return None,None,False
 
 def get_idojaras_vc():
@@ -1158,6 +1166,21 @@ def _quality_bars(szin, val):
         "bottom":"17px","display":"flex","gap":"5px","alignItems":"flex-end",
         "zIndex":"2","overflow":"hidden"})
 
+def kep(fajlnev, alt, className=None, style=None):
+    """Kép WebP-ben, PNG tartalékkal.
+
+    Az oldal képei együtt 2,2 MB-ot tettek ki, ebből egyedül a nyitókép
+    1,4 MB-ot — mobilneten ez volt a betöltés legnagyobb egyetlen tétele.
+    Ugyanezek WebP-ben 151 KB-ot foglalnak. A `<picture>` elem miatt a modern
+    böngésző CSAK a WebP-t tölti le; ha valamelyik régi böngésző nem ismeri,
+    az eredeti PNG-t kapja, tehát senkinél nem marad üres a hely."""
+    torzs = fajlnev.rsplit(".", 1)[0]
+    return html.Picture([
+        html.Source(srcSet=f"/assets/{torzs}.webp", type="image/webp"),
+        html.Img(src=f"/assets/{fajlnev}", alt=alt, className=className, style=style),
+    ])
+
+
 def kpi(cim, val, sub, szin, trend=None, jelolt_i=None):
     cim_lower = str(cim).lower()
     value = str(val)
@@ -1299,6 +1322,7 @@ app.layout = html.Div([
         dcc.Store(id="flux-uzenetek",data=None),
         dcc.Store(id="flux-valasz",data=None),
         dcc.Store(id="flux-noop",data=None),
+        dcc.Store(id="flux-varakozas",data=None),
     ],className="app-main")
 ],className="app-shell")
 
@@ -1321,16 +1345,50 @@ def fetch(n,_manual):
     gen_aukcio = f"{gen_nap}|{'pm' if most.hour >= 14 else 'am'}"
     gen_ora = f"{most:%Y-%m-%d-%H}"
 
-    eur_huf,eur_ok = cachelt("ecb", 6*3600, get_eur_huf, 1, gen=gen_nap, force=manual)
-    ido_df,daily,ido_ok,ido_forras = cachelt("idojaras", 3600, get_idojaras_barmelyik, 2,
-                                             gen=gen_ora, force=manual)
-    dam,dam_ok = cachelt("dam", 1800, get_dam, 1, gen=gen_aukcio, force=manual)
-    load,load_ok = cachelt("load", 3600, get_load, 1, gen=gen_ora, force=manual)
-    mavir_fc,mavir_fc_ok = cachelt("load_forecast", 3600, get_load_forecast, 1,
-                                   gen=gen_aukcio, force=manual)
-    fcs,fc_ok = cachelt("napszelfc", 3600, get_naposzel_fc, 1, gen=gen_aukcio, force=manual)
-    aho,ho_ok = cachelt("homerseklet", 1800, get_ho_barmelyik, 1, gen=gen_ora, force=manual)
-    term,term_ok = cachelt("termeles", 1800, get_termeles, 1, gen=gen_ora, force=manual)
+    # ---- A nyolc külső forrás PÁRHUZAMOSAN ----
+    # Korábban ez a nyolc hívás egymás után futott. Öt közülük az ENTSO-E,
+    # amely önmagában 2-5 másodperc; így egy hideg betöltés 20-30 másodperc
+    # volt, és a látogató addig az "Élő adatok betöltése..." feliratot nézte.
+    # A hívások függetlenek egymástól, ezért egyszerre indíthatók: a teljes
+    # idő a leglassabb forrásé lesz, nem az összegük.
+    parhuzamos = {
+        "ecb":      (lambda: cachelt("ecb", 6*3600, get_eur_huf, 1,
+                                     gen=gen_nap, force=manual), (None, False)),
+        "idojaras": (lambda: cachelt("idojaras", 3600, get_idojaras_barmelyik, 2,
+                                     gen=gen_ora, force=manual), (None, None, False, None)),
+        "dam":      (lambda: cachelt("dam", 1800, get_dam, 1,
+                                     gen=gen_aukcio, force=manual), (None, False)),
+        "load":     (lambda: cachelt("load", 3600, get_load, 1,
+                                     gen=gen_ora, force=manual), (None, False)),
+        "mavir":    (lambda: cachelt("load_forecast", 3600, get_load_forecast, 1,
+                                     gen=gen_aukcio, force=manual), (None, False)),
+        "napszelfc": (lambda: cachelt("napszelfc", 3600, get_naposzel_fc, 1,
+                                      gen=gen_aukcio, force=manual), (None, False)),
+        "ho":       (lambda: cachelt("homerseklet", 1800, get_ho_barmelyik, 1,
+                                     gen=gen_ora, force=manual), (None, False)),
+        "termeles": (lambda: cachelt("termeles", 1800, get_termeles, 1,
+                                     gen=gen_ora, force=manual), (None, False)),
+    }
+    eredmenyek = {}
+    with ThreadPoolExecutor(max_workers=len(parhuzamos)) as vegrehajto:
+        jovok = {nev: vegrehajto.submit(fn) for nev, (fn, _) in parhuzamos.items()}
+        for nev, jovo in jovok.items():
+            try:
+                eredmenyek[nev] = jovo.result()
+            except Exception as e:
+                # A cachelt() csak akkor dob, ha nincs korábbi jó adat sem.
+                # Ilyenkor a forrás egyszerűen hiányzónak számít.
+                print(f"[HIBA] {nev} párhuzamos lekérés: {e}", flush=True)
+                eredmenyek[nev] = parhuzamos[nev][1]
+
+    eur_huf,eur_ok = eredmenyek["ecb"]
+    ido_df,daily,ido_ok,ido_forras = eredmenyek["idojaras"]
+    dam,dam_ok = eredmenyek["dam"]
+    load,load_ok = eredmenyek["load"]
+    mavir_fc,mavir_fc_ok = eredmenyek["mavir"]
+    fcs,fc_ok = eredmenyek["napszelfc"]
+    aho,ho_ok = eredmenyek["ho"]
+    term,term_ok = eredmenyek["termeles"]
 
     hianyzo = []
     if not dam_ok: hianyzo.append("ENTSO-E (DAM árak)")
@@ -1342,6 +1400,33 @@ def fetch(n,_manual):
     # A DAM az egyetlen kritikus forrás: nélküle nincs sem kártya, sem jóslat.
     if not dam_ok:
         return {"kritikus_hiba":True,"hianyzo":hianyzo,"modell_hiba":None}
+
+    # ---- A SZÁMÍTÁS GYORSÍTÓTÁRA ----
+    # Idáig csak a nyers források gyorsítótárazódtak. Minden, ami ezután jön —
+    # a CatBoost jóslat, a 720 órás robusztus STL-bontás, négy külön Supabase-
+    # kapcsolat írásra és a validációs lekérdezések —, MINDEN oldalletöltéskor
+    # újrafutott, akkor is, ha a bemenet betűre ugyanaz volt. Ez volt az oldal
+    # lassúságának a fő oka: nem a lekérés, hanem a fölösleges újraszámolás.
+    #
+    # Az ujjlenyomat a bemenet azonossága: amíg ugyanaz, a korábban kiszámolt
+    # csomag megy vissza. Az időfüggő részek (töltési ablak, aktuális óra) nem
+    # itt készülnek, hanem a `render`-ben a negyedórás árgörbéből, ezért a
+    # kártyák és a "Mikor tölts?" panel a gyorsítótár mellett is élők maradnak.
+    ujjlenyomat = "|".join(str(x) for x in [
+        dam.get("utolso_ar_ora"), dam.get("holnapi_ar"), len(dam.get("ma_oras") or []),
+        (load.index.max().isoformat() if load_ok else "-"), (len(load) if load_ok else 0),
+        (len(fcs.get("nap") or {}) if fc_ok else 0),
+        (len(mavir_fc or {}) if mavir_fc_ok else 0),
+        (len(term.get("nap") or {}) if term_ok else 0),
+        (len(ido_df) if ido_ok else 0), eur_huf, aho, gen_ora,
+    ])
+    if not manual:
+        with SZAMITAS_LOCK:
+            kesz = SZAMITAS_CACHE.get("csomag")
+            if (kesz is not None
+                    and SZAMITAS_CACHE.get("ujjlenyomat") == ujjlenyomat
+                    and (time.time() - SZAMITAS_CACHE.get("ido", 0)) < SZAMITAS_TTL):
+                return kesz
 
     dam_oras = {pd.Timestamp(k): v for k,v in dam["oras"].items()}
 
@@ -1417,9 +1502,14 @@ def fetch(n,_manual):
             res = STL(s,period=24,seasonal=25,robust=True).fit()
             std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
             mask=abs(res.resid-mean)>kuszob
-            stl_data={"trend":res.trend.tolist(),"seasonal":res.seasonal.tolist(),
+            # A négy idősor 0,1 MWh-ra kerekítve megy a böngészőbe. Teljes
+            # lebegőpontos alakban négyszer ~700 érték a `dcc.Store` JSON
+            # méretének a nagy részét adta, miközben a grafikonokon egy MWh
+            # tizede sem látszik.
+            _k1 = lambda sor: [round(float(x), 1) for x in sor]
+            stl_data={"trend":_k1(res.trend),"seasonal":_k1(res.seasonal),
                 "idok":[t.isoformat() for t in s.index],
-                "residual":res.resid.tolist(),"original":[float(x) for x in s],
+                "residual":_k1(res.resid),"original":_k1(s),
                 "anomalia_db":int(mask.sum()),
                 "stat":{"std":std,"mean":mean,"kuszob":kuszob,
                     "irany":"emelkedő" if res.trend.iloc[-1]>res.trend.iloc[-24] else "csökkenő"}}
@@ -1464,7 +1554,7 @@ def fetch(n,_manual):
             mavir_forecast=mavir_forecast,
         )
     validacio = get_validacio_adatok()
-    return {
+    csomag = {
         "eredm":eredm,
         "validacio":validacio,
         "ablak_h":ablak_h,
@@ -1484,6 +1574,12 @@ def fetch(n,_manual):
         "frissites_tipus":"kézi" if manual else "automatikus",
         "fb":{"ENTSO-E":not (dam_ok and load_ok and fc_ok),"Időjárás":not ido_ok,"ECB":not eur_ok},
         "hianyzo":hianyzo}
+
+    # A kész csomag a polcra kerül: a következő látogató ugyanezt kapja
+    # újraszámolás nélkül, amíg a bemenet ugyanaz.
+    with SZAMITAS_LOCK:
+        SZAMITAS_CACHE.update({"ujjlenyomat":ujjlenyomat,"ido":time.time(),"csomag":csomag})
+    return csomag
 
 @callback(Output("oldal","data"),
     [Input(f"nav-{x}","n_clicks")
@@ -1676,14 +1772,13 @@ def nyitooldal():
         ],id="flux-szam-doboz",style={"display":"none","flexDirection":"column","gap":"4px"}),
 
         dcc.Input(id="flux-kerdes",type="text",debounce=False,
-                  placeholder="Kérdezz Fluxtól…",className="flux-kerdes"),
+                  placeholder="Kérdezz Fluxtól, majd Enter…",className="flux-kerdes"),
 
     ],className="flux-reteg")
 
     return html.Div([
-        html.Img(src=dash.get_asset_url("hero-grid.png"),
-                 alt="Villamosenergia-hálózat", className="hero-kep",
-                 style={"display":"block","width":"100%","height":"auto"}),
+        kep("hero-grid.png", "Villamosenergia-hálózat", className="hero-kep",
+            style={"display":"block","width":"100%","height":"auto"}),
         flux_reteg
     ], className="hero-panel",
        style={"position":"relative","width":"100%","overflow":"hidden",
@@ -1717,11 +1812,15 @@ def flux_kerdes(_n, kerdes, data):
         return dash.no_update, dash.no_update
     try:
         aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
-        return flux.valasz(kerdes, data, aj), ""
+        v = flux.valasz(kerdes, data, aj)
     except Exception as e:
         print(f"[FLUX] Kérdés callback: {e}", flush=True)
-        return {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
-                "szam":None,"cimke":None}, ""
+        v = {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
+             "szam":None,"cimke":None}
+    # A sorszám nélkül a böngésző nem venné észre, ha valaki UGYANAZT kérdezi
+    # kétszer: a `dcc.Store` értéke betűre azonos lenne, a gépelés nem indulna
+    # újra, és a látogató úgy látná, hogy Flux másodszorra nem válaszol.
+    return {**v, "_n": int(time.time() * 1000)}, ""
 
 
 # ---- Flux: az adatok átadása a böngészőnek ----
@@ -1737,6 +1836,23 @@ app.clientside_callback(
     """,
     Output("flux-noop","data"),
     [Input("flux-uzenetek","data"),Input("flux-valasz","data")],
+)
+
+# ---- Flux: azonnali visszajelzés a kérdésre ----
+# A szerver a válaszhoz megnézi az élő adatokat, ez néhány másodperc. Enélkül
+# a látogató annyit lát, hogy leütötte az Entert és semmi nem történik — ez
+# volt az egyik oka annak, hogy "Flux nem válaszol". A jelzés a böngészőben
+# fut, tehát a hálózati körre nem kell megvárni.
+app.clientside_callback(
+    """
+    function(n_submit) {
+        if (n_submit && window.fluxVarakozas) window.fluxVarakozas();
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("flux-varakozas","data"),
+    Input("flux-kerdes","n_submit"),
+    prevent_initial_call=True,
 )
 
 # ============================================================
@@ -1870,8 +1986,8 @@ def fooldal(data,aj):
                 html.Div("MIKOR TÖLTS?",className="charge-eyebrow"),
                 html.Div([
                     html.Div([
-                        html.Img(src="/assets/sports-coupe-board.png",
-                            alt="Elektromos sportautó",className="charge-car-source"),
+                        kep("sports-coupe-board.png", "Elektromos sportautó",
+                            className="charge-car-source"),
                         html.Div(className="charge-headlight charge-headlight-bal"),
                         html.Div(className="charge-headlight charge-headlight-jobb"),
                         html.Div(className="charge-floor-glow")
@@ -2500,7 +2616,7 @@ def _anomalia_naplo_panel(naplo):
         ho = (f"{r['homerseklet']:.0f} °C · "
               if r.get("homerseklet") is not None else "")
         if kat in KAT_KEP:
-            ikon = html.Img(src=f"/assets/{KAT_KEP[kat]}", alt=nev,
+            ikon = kep(KAT_KEP[kat], nev,
                 style={"width":"34px","height":"28px","objectFit":"contain",
                        "flex":"0 0 auto"})
         else:
@@ -2536,9 +2652,9 @@ def _stl_ador_nagy(naplo, kategoriak):
         friss[k] = friss.get(k, 0) + 1
     osszes = kategoriak or {}
     csempek = []
-    for kulcs, nev, szin, kep in KAT_META:
+    for kulcs, nev, szin, kepfajl in KAT_META:
         csempek.append(html.Div([
-            html.Img(src=f"/assets/{kep}", alt=nev, style={"width":"84px",
+            kep(kepfajl, nev, style={"width":"84px",
                 "height":"66px","objectFit":"contain","margin":"0 auto 8px",
                 "display":"block"}),
             html.Div(str(friss.get(kulcs, 0)), style={"fontSize":"30px",
