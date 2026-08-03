@@ -1531,6 +1531,38 @@ body {
   #flux-szam { font-size: 24px !important; }
 }
 
+/* ------------------------------------------------------------
+   MOBIL: a Flux-réteg NEM a képre kerül, hanem alá.
+
+   Amíg rárétegeztük, a `.hero-panel { overflow: hidden }` levágta:
+   egy 390 px széles telefonon a kép mindössze ~153 px magas, a Flux-szöveg
+   viszont tíz sorba tördelve ~240 px, tehát a kiemelt szám és — ami a
+   lényeg — a "Kérdezz Fluxtól…" beviteli mező teljes egészében a levágott
+   sávba esett. A látogató nem látta és nem is tudta megérinteni, vagyis
+   Flux nem azért hallgatott, mert nem volt válasza: nem lehetett kérdezni
+   tőle. Álló elrendezésben a panel a tartalommal együtt nő, semmi nem
+   vész el.
+   ------------------------------------------------------------ */
+@media (max-width: 760px) {
+  .flux-reteg {
+    position: static;
+    top: auto;
+    left: auto;
+    width: auto;
+    padding: 16px 16px 20px;
+    gap: 12px;
+    text-shadow: none;
+  }
+
+  .flux-reteg > div:nth-child(2) { min-height: 72px; }
+
+  .flux-kerdes {
+    width: 100%;
+    font-size: 16px;      /* 16px alatt az iOS ráközelít a mezőre */
+    padding: 11px 2px;    /* kényelmesen megérinthető méret */
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .flux-kurzor { animation: none; }
 }

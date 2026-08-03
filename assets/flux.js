@@ -11,6 +11,8 @@
   const KITARTAS_MIN = 1800;   // rövid megállapítás ennyit marad kint
   const KITARTAS_MAX = 3500;   // hosszú megállapítás legfeljebb ennyit
 
+  const VARAKOZO_SOR = "Egy pillanat, megnézem az élő adatokat…";
+
   // a gépelés alatt a látogató már olvas, ezért a végén csak rövid szünet kell
   function kitartas(sor) {
     const ms = 1400 + sor.length * 6;
@@ -19,20 +21,39 @@
 
   const st = {
     i: 0, k: 0, utolso: 0, varakozasKezdet: 0,
-    valaszKulcs: null, valaszAktiv: false,
+    valaszKulcs: null, valaszAktiv: false, varakozott: false,
   };
 
   const el = (id) => document.getElementById(id);
 
+  function ujrakezd() {
+    st.i = 0; st.k = 0; st.varakozasKezdet = 0;
+  }
+
   function lista() {
     const d = window.FLUX_DATA || {};
     const uz = Array.isArray(d.uzenetek) ? d.uzenetek : [];
+
+    /* A kérdés elküldése és a válasz megérkezése között akár néhány másodperc
+       is eltelhet (a szerver ilyenkor kérdezi meg az élő adatokat). Ha ez alatt
+       a szokásos körbe-körbe járó szöveg futna tovább, a látogató azt hiszi,
+       Flux nem is hallotta meg a kérdést. Ezért erre az időre egyetlen,
+       egyértelmű sor marad kint. */
+    if (window.FLUX_VARAKOZAS) {
+      if (!st.varakozott) { st.varakozott = true; ujrakezd(); }
+      return [{ sor: VARAKOZO_SOR, szam: null, cimke: null }];
+    }
+    if (st.varakozott) { st.varakozott = false; ujrakezd(); }
+
     if (d.valasz) {
+      /* A kulcsban benne van a szerver által adott sorszám is, ezért ugyanaz a
+         kérdés másodszorra is lejátszódik — korábban a változatlan szöveg miatt
+         a második kérdésre látszólag semmi nem történt. */
       const kulcs = JSON.stringify(d.valasz);
       if (st.valaszKulcs !== kulcs) {
         st.valaszKulcs = kulcs;
         st.valaszAktiv = true;
-        st.i = 0; st.k = 0; st.varakozasKezdet = 0;
+        ujrakezd();
       }
       if (st.valaszAktiv) return [d.valasz].concat(uz);
     }
@@ -84,6 +105,7 @@
     requestAnimationFrame(hurok);
   }
 
-  window.fluxIndit = function () {};   // a Dash callback ezt hívja; az állapot már fut
+  window.fluxIndit = function () { window.FLUX_VARAKOZAS = false; };
+  window.fluxVarakozas = function () { window.FLUX_VARAKOZAS = true; };
   requestAnimationFrame(hurok);
 })();
