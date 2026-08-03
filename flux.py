@@ -712,12 +712,39 @@ def _kereses_a_sajat_szovegekben(kerdes, uzenetek):
     return None
 
 
-def valasz(kerdes, data, ajanlas=None):
-    """A látogató kérdésére adott egyetlen válasz. Ellenőrzésen bukás esetén őszinte nemet mond."""
+def _elozmeny_szoveg(elozmeny):
+    """Az utolsó néhány kérdés-válasz pár a promptba, hogy a visszakérdezés
+    ('és holnap?') is értelmezhető legyen."""
+    if not elozmeny:
+        return ""
+    sorok = []
+    for u in elozmeny[-6:]:
+        if not u or not u.get("sor"):
+            continue
+        ki = "Látogató" if u.get("szerep") == "latogato" else "Flux"
+        sorok.append(f"{ki}: {str(u['sor'])[:300]}")
+    if not sorok:
+        return ""
+    return ("A beszélgetés eddigi menete (csak a szövegkörnyezet miatt kapod; "
+            "az adatok forrása továbbra is KIZÁRÓLAG a fenti JSON):\n"
+            + "\n".join(sorok) + "\n\n")
+
+
+def valasz(kerdes, data, ajanlas=None, elozmeny=None):
+    """A látogató kérdésére adott egyetlen válasz.
+
+    A visszaadott dict 'allapot' mezője megmondja, HONNAN jött a szöveg:
+      'gemini'     — a modell válasza, ellenőrzésen átment,
+      'kozeli'     — nem sikerült válaszolni, a saját mondataink közül a
+                     kérdéshez legközelebbi megy ki (a felület ezt kiírja),
+      'nincs_adat' — a kérdés témájához nincs élő mező.
+    Így a felület nem tehet úgy, mintha a sablon közvetlen válasz lenne.
+    """
     f, _ = tenyek(data, ajanlas)
     nem_tudom = {"sor": "Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre "
-                        "pontos válasz.",
-                 "szam": None, "cimke": None}
+                        "pontos válasz. Kérdezz az árakról, a fogyasztásról, a nap- és "
+                        "széltermelésről vagy a szokatlan órákról.",
+                 "szam": None, "cimke": None, "allapot": "nincs_adat"}
     if f is None or not str(kerdes).strip():
         return nem_tudom
     sajat = sablon_uzenetek(f)
@@ -725,19 +752,31 @@ def valasz(kerdes, data, ajanlas=None):
         prompt = (
             "Élő adatok:\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
+            f"{_elozmeny_szoveg(elozmeny)}"
             f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
             "Válaszolj EGY megállapítással ugyanabban a formában "
-            "('sor', 'szam', 'cimke'). Használd a 'megujulok', 'fogyasztas', 'dam', "
+            "('sor', 'szam', 'cimke'). A 'sor' KÖZVETLENÜL a kérdésre feleljen, "
+            "első mondatában. Használd a 'megujulok', 'fogyasztas', 'dam', "
             "'toltes', 'kartyak', 'modell_pontossag' és 'adatminoseg' mezőket. "
             "Ha az időpont nem mai, írd ki, hogy holnapi. "
+            "Ha a 'megujulok' mezőben 'nap_termeles_mara_lezarult' szerepel, a "
+            "napelemes termelésről MÚLT időben beszélj. "
             "Csak akkor mondd, hogy nem tudsz válaszolni, ha a kérdés témájához "
             "TÉNYLEG nincs mező az adatokban."
         )
         v = _gemini(prompt, _UZENET_SEMA)
         jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
         if jo:
-            return jo[0]
+            valasz_dict = dict(jo[0])
+            valasz_dict["allapot"] = "gemini"
+            return valasz_dict
         print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
-    return _kereses_a_sajat_szovegekben(kerdes, sajat) or nem_tudom
+
+    kozeli = _kereses_a_sajat_szovegekben(kerdes, sajat)
+    if kozeli:
+        kozeli = dict(kozeli)
+        kozeli["allapot"] = "kozeli"
+        return kozeli
+    return nem_tudom
