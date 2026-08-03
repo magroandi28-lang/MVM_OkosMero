@@ -15,6 +15,7 @@ import re
 import json
 import hashlib
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -32,7 +33,19 @@ PROMPT_VERSION = "flux-v1"
 LANGUAGE = "hu-HU"
 TTL_PERC = 35          # a 30 perces adatfrissítéshez igazítva: egy adatállapot
                        # = egy Gemini-hívás, utána tárolt szöveg megy ki
-GEMINI_TIMEOUT = 12
+GEMINI_TIMEOUT = 8     # 12 s várakozás rosszabb a látogatónak, mint a sablon
+
+# A szerver órája Renderen UTC, a data["megujulo"]["ido"] bélyegek viszont
+# budapesti faliórát mutatnak. Ezért ebben a modulban SEHOL nem hívunk
+# datetime.now()-ot közvetlenül — csak a _helyi_most()-ot.
+BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
+KUSZOB_MW = 200        # ez alatt a "hátralévő csúcs" mérési zaj, nem csúcs
+
+
+def _helyi_most():
+    """Budapesti falióra, a szerver időzónájától függetlenül.
+    Ugyanaz a helper, amit az app.py is használ."""
+    return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
 
 KOSZONTO = (
     "Szia, Flux vagyok, az OkosMérő energiaasszisztense. Élő energiapiaci és "
@@ -167,7 +180,7 @@ def tenyek(data, ajanlas=None):
     val = data.get("validacio") or {}
     # A CatBoost és a MAVIR összevetése CSAK lezárt, teljes napon korrekt.
     # A futó nap részleges órái nem hasonlíthatók össze, ezért kimaradnak.
-    ma_str = str(datetime.now().date())
+    ma_str = str(_helyi_most().date())          # budapesti nap, nem a szerveré
     lezart = next((n for n in (val.get("napok") or [])
                    if n.get("nap") != ma_str and (n.get("orak") or 0) >= 20), None)
     if lezart:
@@ -214,7 +227,8 @@ def tenyek(data, ajanlas=None):
     meg = data.get("megujulo") or {}
     if meg.get("fc_nap") and meg.get("fc_szel"):
         idok = meg.get("ido") or []
-        most_ts = datetime.now()
+        # A futó óra MÁR NEM jövő: 20:40-kor a 20:00-s sor a múlté.
+        most_ora = _helyi_most().replace(minute=0, second=0, microsecond=0)
         jovo_nap, mult_nap = [], []
         for i, iso in enumerate(idok):
             if i >= len(meg["fc_nap"]):
@@ -223,13 +237,13 @@ def tenyek(data, ajanlas=None):
                 t = datetime.fromisoformat(iso)
             except Exception:
                 continue
-            (jovo_nap if t > most_ts else mult_nap).append(float(meg["fc_nap"][i]))
+            (jovo_nap if t > most_ora else mult_nap).append(float(meg["fc_nap"][i]))
 
         mg = {"nap_mai_csucs_mw": _kerekit(max(meg["fc_nap"])),
               "szel_mai_csucs_mw": _kerekit(max(meg["fc_szel"]))}
         # A "várható" szó CSAK a hátralévő órákra igaz. Este a napelemes
         # termelés már lecsengett, ilyenkor múlt időben beszélünk róla.
-        if jovo_nap and max(jovo_nap) > 50:
+        if jovo_nap and max(jovo_nap) >= KUSZOB_MW:
             mg["nap_hatralevo_csucs_mw"] = _kerekit(max(jovo_nap))
         else:
             mg["nap_termeles_mara_lezarult"] = True
@@ -340,7 +354,7 @@ def _ido(iso):
         t = datetime.fromisoformat(iso)
     except Exception:
         return ""
-    ma = datetime.now().date()
+    ma = _helyi_most().date()
     if t.date() == ma:
         return t.strftime("%H:%M")
     if (t.date() - ma).days == 1:
