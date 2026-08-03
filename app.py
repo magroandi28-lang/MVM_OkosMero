@@ -507,7 +507,7 @@ def model_predict(X_df):
 # ============================================================
 CACHE = {}
 
-def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False):
+def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=3):
     most = time.time()
     rec = CACHE.get(kulcs)
     friss = (rec is not None and not force
@@ -515,15 +515,30 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False):
              and (gen is None or rec.get("gen") == gen))
     if friss:
         return rec["ertek"]
-    ertek = fn()
-    if ertek[ok_index]:
-        CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
-        return ertek
+
+    # Indulás után az első hívás gyakran timeoutol (hideg kapcsolat, lassú
+    # külső API). Ilyenkor nincs korábbi jó adat, ezért újrapróbálkozunk.
+    ertek = None
+    for kiserlet in range(1, max(1, ujra) + 1):
+        try:
+            ertek = fn()
+        except Exception as e:
+            print(f"[HIBA] {kulcs} lekérés ({kiserlet}.): {e}", flush=True)
+            ertek = None
+        if ertek is not None and ertek[ok_index]:
+            CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
+            return ertek
+        if kiserlet < max(1, ujra):
+            varakozas = 1.5 * kiserlet
+            print(f"[INFO] {kulcs}: {kiserlet}. kísérlet sikertelen, "
+                  f"újrapróbálkozás {varakozas:.0f} mp múlva", flush=True)
+            time.sleep(varakozas)
+
     if rec:
         print(f"[CACHE] {kulcs}: friss hívás sikertelen, korábbi jó adat "
               f"({int((most-rec['ido'])/60)} perce)", flush=True)
         return rec["ertek"]
-    return ertek
+    return ertek if ertek is not None else fn()
 
 def _helyi_most():
     """Budapesti falióra, a szerver saját időzónájától függetlenül."""
