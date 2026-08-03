@@ -14,6 +14,7 @@ import threading
 import math
 from datetime import datetime, timedelta
 from io import StringIO
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from statsmodels.tsa.seasonal import STL
 import holidays
@@ -32,6 +33,19 @@ app = dash.Dash(__name__,
     meta_tags=[{"name":"viewport","content":"width=device-width,initial-scale=1"}])
 app.title = "OkosMérő"
 server = app.server
+
+# A Dash tartalom-lenyomatot fűz az assetekhez (?m=…), ezért a hosszú lejárat
+# biztonságos: új fájl = új URL. Visszatérő látogatónál a hero-kép és a
+# KPI-hátterek nem töltődnek le újra.
+server.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
+
+
+@server.after_request
+def _statikus_cache(valasz):
+    from flask import request
+    if request.path.startswith("/assets/"):
+        valasz.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return valasz
 
 # Gzip-tömörítés: a Plotly és a Dash JS-csomagok így töredék méretben
 # érkeznek meg — mobilneten ez a betöltés legnagyobb tétele.
@@ -508,10 +522,12 @@ def model_predict(X_df):
 # semmit.
 # ============================================================
 CACHE = {}
+CACHE_LOCK = threading.Lock()   # a nyolc forrás párhuzamosan ír a polcra
 
 def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
     most = time.time()
-    rec = CACHE.get(kulcs)
+    with CACHE_LOCK:
+        rec = CACHE.get(kulcs)
     friss = (rec is not None and not force
              and (most - rec["ido"]) < ttl_sec
              and (gen is None or rec.get("gen") == gen))
@@ -529,7 +545,8 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
             print(f"[HIBA] {kulcs} lekérés ({kiserlet}.): {e}", flush=True)
             ertek = None
         if ertek is not None and ertek[ok_index]:
-            CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
+            with CACHE_LOCK:
+                CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
             return ertek
         if kiserlet < max_kiserlet:
             time.sleep(1.0)
@@ -1087,9 +1104,14 @@ def _rgba(hex_color, alpha):
         return f"rgba(255,255,255,{alpha})"
 
 def _mini_sparkline(trend, szin, jelolt_i=None):
-    """A fehér karika ARRA a pontra kerül, amelyiket a kártya nagy
-    száma mutat. Vonal: lineáris, nem spline — a spline a 36px-es
-    sávban ellapította a csúcsot, ezért tűnt minden nap egyformának."""
+    """A fehér karika ARRA a pontra kerül, amelyiket a kártya nagy száma
+    mutat. Vonal: lineáris, nem spline — a spline a 36px-es sávban
+    ellapította a csúcsot, ezért tűnt minden nap egyformának.
+
+    A rajz SVG (adat-URI háttér), NEM dcc.Graph. Amíg Graph volt a kezdő
+    nézetben, a Dash a főoldalra is behúzta a teljes plotly.js darabot két
+    40 pixeles vonalért. A geometria megegyezik a Plotly-változattal:
+    y-tartomány = [min - pad, max + pad], pad = 8% vagy 0.5."""
     if trend is None:
         return None
     try:
@@ -1100,25 +1122,48 @@ def _mini_sparkline(trend, szin, jelolt_i=None):
         return None
     if jelolt_i is not None and not (0 <= jelolt_i < len(y)):
         jelolt_i = None
+
     ymin, ymax = min(y), max(y)
     pad = max((ymax - ymin) * 0.08, 0.5)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(y=y, mode="lines",
-        line=dict(color=szin, width=2.1),
-        fill="tozeroy", fillcolor=_rgba(szin, 0.055),
-        hoverinfo="skip", showlegend=False))
+    lo, hi = ymin - pad, ymax + pad
+    sav = (hi - lo) or 1.0
+
+    SZ, MA = 100.0, 36.0      # viewBox; preserveAspectRatio="none" nyújtja
+    n = len(y)
+
+    def _px(i):
+        return i / (n - 1) * SZ
+
+    def _py(v):
+        return MA - (v - lo) / sav * MA
+
+    pontok = " ".join(f"{_px(i):.2f},{_py(v):.2f}" for i, v in enumerate(y))
+    terulet = f"0,{MA:.2f} " + pontok + f" {SZ:.2f},{MA:.2f}"
+
+    jelolo = ""
     if jelolt_i is not None:
-        fig.add_trace(go.Scatter(x=[jelolt_i], y=[y[jelolt_i]], mode="markers",
-            marker=dict(size=7, color=szin, line=dict(width=1.1, color="rgba(255,255,255,.78)")),
-            hoverinfo="skip", showlegend=False))
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0,r=0,t=0,b=0), height=36,
-        xaxis=dict(visible=False, fixedrange=True),
-        yaxis=dict(visible=False, fixedrange=True, range=[ymin-pad, ymax+pad]),
-        showlegend=False)
-    return dcc.Graph(figure=fig, config={"displayModeBar": False, "staticPlot": True},
-        style={"position":"absolute","left":"13px","right":"13px","bottom":"10px",
-               "height":"36px","zIndex":"2","pointerEvents":"none"})
+        jelolo = (f'<circle cx="{_px(jelolt_i):.2f}" cy="{_py(y[jelolt_i]):.2f}" '
+                  f'r="3.5" fill="{szin}" stroke="rgba(255,255,255,.78)" '
+                  f'stroke-width="1.1" vector-effect="non-scaling-stroke"/>')
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SZ:.0f} {MA:.0f}" '
+        f'preserveAspectRatio="none">'
+        f'<polygon points="{terulet}" fill="{_rgba(szin, 0.055)}"/>'
+        f'<polyline points="{pontok}" fill="none" stroke="{szin}" '
+        f'stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" '
+        f'vector-effect="non-scaling-stroke"/>'
+        f'{jelolo}'
+        f'</svg>'
+    )
+
+    return html.Div(style={
+        "position": "absolute", "left": "13px", "right": "13px", "bottom": "10px",
+        "height": "36px", "zIndex": "2", "pointerEvents": "none",
+        "backgroundImage": f'url("data:image/svg+xml,{quote(svg, safe="")}")',
+        "backgroundRepeat": "no-repeat",
+        "backgroundSize": "100% 100%",
+    })
 
 # A 3. kártya (Budapest-sziluett) és a 4. (EUR-hullám) képét a layout.css
 # ::after rétege rajzolja, `background-size: 98% auto` / `100% auto` mérettel.
@@ -1299,15 +1344,9 @@ app.layout = html.Div([
     ],className="app-main")
 ],className="app-shell")
 
-@callback(Output("adatok","data"),
-    [Input("refresh","n_intervals"),Input("manual-refresh","n_clicks")],
-    running=[
-        (Output("manual-refresh","disabled"),True,False),
-        (Output("manual-refresh","children"),"Frissítés…","Frissítés"),
-    ])
-def fetch(n,_manual):
-    manual = dash.ctx.triggered_id == "manual-refresh"
-
+def adatcsomag(manual=False):
+    """Az élő adatcsomag előállítása. Callbacktől függetlenül hívható, hogy
+    az indulás utáni előmelegítő szál is fel tudja tölteni a gyorsítótárat."""
     if bundle is None:
         return {"kritikus_hiba":True,"hianyzo":[],"modell_hiba":MODELL_HIBA}
 
@@ -1318,16 +1357,46 @@ def fetch(n,_manual):
     gen_aukcio = f"{gen_nap}|{'pm' if most.hour >= 14 else 'am'}"
     gen_ora = f"{most:%Y-%m-%d-%H}"
 
-    eur_huf,eur_ok = cachelt("ecb", 6*3600, get_eur_huf, 1, gen=gen_nap, force=manual)
-    ido_df,daily,ido_ok,ido_forras = cachelt("idojaras", 3600, get_idojaras_barmelyik, 2,
-                                             gen=gen_ora, force=manual)
-    dam,dam_ok = cachelt("dam", 1800, get_dam, 1, gen=gen_aukcio, force=manual)
-    load,load_ok = cachelt("load", 3600, get_load, 1, gen=gen_ora, force=manual)
-    mavir_fc,mavir_fc_ok = cachelt("load_forecast", 3600, get_load_forecast, 1,
-                                   gen=gen_aukcio, force=manual)
-    fcs,fc_ok = cachelt("napszelfc", 3600, get_naposzel_fc, 1, gen=gen_aukcio, force=manual)
-    aho,ho_ok = cachelt("homerseklet", 1800, get_ho_barmelyik, 1, gen=gen_ora, force=manual)
-    term,term_ok = cachelt("termeles", 1800, get_termeles, 1, gen=gen_ora, force=manual)
+    # A nyolc forrás egymástól független, ezért PÁRHUZAMOSAN kérjük le őket:
+    # a látogató a leglassabb forrás idejét várja, nem a nyolc idő összegét.
+    # A cachelt() logikája változatlan — csak nem sorban hívjuk.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        job = {
+            "ecb": ex.submit(cachelt, "ecb", 6*3600, get_eur_huf, 1,
+                             gen=gen_nap, force=manual),
+            "idojaras": ex.submit(cachelt, "idojaras", 3600, get_idojaras_barmelyik, 2,
+                                  gen=gen_ora, force=manual),
+            "dam": ex.submit(cachelt, "dam", 1800, get_dam, 1,
+                             gen=gen_aukcio, force=manual),
+            "load": ex.submit(cachelt, "load", 3600, get_load, 1,
+                              gen=gen_ora, force=manual),
+            "load_forecast": ex.submit(cachelt, "load_forecast", 3600, get_load_forecast, 1,
+                                       gen=gen_aukcio, force=manual),
+            "napszelfc": ex.submit(cachelt, "napszelfc", 3600, get_naposzel_fc, 1,
+                                   gen=gen_aukcio, force=manual),
+            "homerseklet": ex.submit(cachelt, "homerseklet", 1800, get_ho_barmelyik, 1,
+                                     gen=gen_ora, force=manual),
+            "termeles": ex.submit(cachelt, "termeles", 1800, get_termeles, 1,
+                                  gen=gen_ora, force=manual),
+        }
+
+        def _eredmeny(kulcs, alap):
+            """Egy forrás hibája ne dőljön rá az egész lekérésre: az adott
+            forrás 'nem elérhető' lesz, a többi adat viszont megjelenik."""
+            try:
+                return job[kulcs].result()
+            except Exception as e:
+                print(f"[HIBA] {kulcs} szál: {e}", flush=True)
+                return alap
+
+        eur_huf,eur_ok = _eredmeny("ecb", (None, False))
+        ido_df,daily,ido_ok,ido_forras = _eredmeny("idojaras", (None, None, False, None))
+        dam,dam_ok = _eredmeny("dam", (None, False))
+        load,load_ok = _eredmeny("load", (None, False))
+        mavir_fc,mavir_fc_ok = _eredmeny("load_forecast", (None, False))
+        fcs,fc_ok = _eredmeny("napszelfc", (None, False))
+        aho,ho_ok = _eredmeny("homerseklet", (None, False))
+        term,term_ok = _eredmeny("termeles", (None, False))
 
     hianyzo = []
     if not dam_ok: hianyzo.append("ENTSO-E (DAM árak)")
@@ -1481,6 +1550,15 @@ def fetch(n,_manual):
         "frissites_tipus":"kézi" if manual else "automatikus",
         "fb":{"ENTSO-E":not (dam_ok and load_ok and fc_ok),"Időjárás":not ido_ok,"ECB":not eur_ok},
         "hianyzo":hianyzo}
+
+@callback(Output("adatok","data"),
+    [Input("refresh","n_intervals"),Input("manual-refresh","n_clicks")],
+    running=[
+        (Output("manual-refresh","disabled"),True,False),
+        (Output("manual-refresh","children"),"Frissítés…","Frissítés"),
+    ])
+def fetch(n,_manual):
+    return adatcsomag(manual=(dash.ctx.triggered_id == "manual-refresh"))
 
 @callback(Output("oldal","data"),
     [Input(f"nav-{x}","n_clicks")
@@ -2693,73 +2771,4 @@ def _ar_megujulo_panel(meg, negyed):
                 "textTransform":"uppercase"}),
             html.Div(ertek, style={"fontSize":"16px","fontWeight":"600",
                 "color":szin,"marginTop":"3px"}),
-            html.Div(sub, style={"fontSize":"9px","color":"#94a3b8","marginTop":"2px"}),
-        ], style={"background":C['card2'],"borderRadius":"8px","padding":"10px",
-                  "marginBottom":"8px"})
-
-    if korr is not None:
-        korr_kartya = _szamkartya("Mai együttmozgás (mért órákon)", f"{korr:+.2f}",
-            "több megújuló → olcsóbb óra" if korr < -0.3 else "ma gyenge az együttmozgás",
-            C['gr'] if korr < -0.3 else C['yw'])
-    else:
-        korr_kartya = _szamkartya("Mai együttmozgás", "gyűjtés alatt",
-            "legalább 6 mért óra kell hozzá", C['mut'])
-
-    return html.Div([cim,
-        html.Div(alcim, style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 12px"}),
-        dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig, config={"displayModeBar": False},
-                style={"height":"310px"}), lg=8, md=12),
-            dbc.Col([korr_kartya,
-                _szamkartya(csucs_cimke, csucs_txt, "nap + szél együtt", C['gr']),
-                _szamkartya("A nap legolcsóbb órája", armin_txt, "DAM órás átlag", "#ff9800"),
-                _szamkartya("Negatív árú idő ma", neg_txt, neg_sub, C['gr']),
-            ], lg=4, md=12),
-        ], className="g-3"),
-        html.Div("Háttér: az alacsony költségű nap- és széltermelés kiszorítja a "
-                 "drágább erőműveket a napelőtti aukción — ezért mozog a két görbe "
-                 "jellemzően ellentétesen. Ez köti össze az időjárást, a termelést, "
-                 "az árat és a főoldali töltési döntést.",
-            style={"fontSize":"10px","color":C['mut'],
-                   "borderTop":f"1px solid {C['brd']}","paddingTop":"9px",
-                   "marginTop":"10px"}),
-    ], style=CS)
-
-
-def megujulok(data):
-    meg = data.get("megujulo")
-    if meg:
-        felso = _megujulo_panel(meg, [], "")
-    else:
-        felso = hianyzo_panel("MEGÚJULÓ TERMELÉS",
-            "A nap/szél előrejelzés jelenleg nem elérhető.")
-    return html.Div([
-        html.Div("Megújuló energia", style={"fontSize":"16px","fontWeight":"600",
-            "color":C['wh'],"marginBottom":"14px"}),
-        dbc.Row([dbc.Col(felso, md=12)], className="g-3 mb-3"),
-        dbc.Row([dbc.Col(_ar_megujulo_panel(meg, data.get("negyed")), md=12)],
-                className="g-3"),
-    ])
-
-
-def mllabor(data):
-    v = data.get("validacio") or {}
-    naplo = v.get("naplo") or []
-    return html.Div([
-        html.Div("Gépi Tanulás Modell Labor", style={"fontSize":"16px",
-            "fontWeight":"600","color":C['wh'],"marginBottom":"14px"}),
-        dbc.Row([
-            dbc.Col(_reziduum_panel(data.get("stl"), naplo), lg=8, md=12),
-            dbc.Col(_anomalia_naplo_panel(naplo), lg=4, md=12),
-        ], className="g-3 mb-3"),
-        dbc.Row([
-            dbc.Col(_stl_ador_nagy(naplo, v.get("kategoriak")), md=12)
-        ], className="g-3"),
-    ])
-
-
-if __name__=="__main__":
-    # Lokális futtatás. Élesben (Render) a gunicorn indítja: gunicorn app:server
-    port = int(os.environ.get("PORT", 8050))
-    debug = os.environ.get("DASH_DEBUG", "false").lower() == "true"
-    app.run(debug=debug, host="0.0.0.0", port=port)
+            html.Div(sub, style={"fontSize":"9px","color":"#94a3b8","ma
