@@ -8,7 +8,14 @@
 
 (function () {
   const KARAKTER_MS = 55;      // ~18 karakter / másodperc
-  const KITARTAS_MS = 14000;   // ennyi ideig marad kint a kész megállapítás
+  const KITARTAS_MIN = 1800;   // rövid megállapítás ennyit marad kint
+  const KITARTAS_MAX = 3500;   // hosszú megállapítás legfeljebb ennyit
+
+  // a gépelés alatt a látogató már olvas, ezért a végén csak rövid szünet kell
+  function kitartas(sor) {
+    const ms = 1400 + sor.length * 6;
+    return Math.min(KITARTAS_MAX, Math.max(KITARTAS_MIN, ms));
+  }
 
   const st = {
     i: 0, k: 0, utolso: 0, varakozasKezdet: 0,
@@ -48,7 +55,7 @@
       }
     } else if (!st.varakozasKezdet) {
       st.varakozasKezdet = most;
-    } else if (most - st.varakozasKezdet >= KITARTAS_MS) {
+    } else if (most - st.varakozasKezdet >= kitartas(sor)) {
       st.varakozasKezdet = 0;
       st.k = 0;
       if (st.valaszAktiv) { st.valaszAktiv = false; st.i = 0; }
