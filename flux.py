@@ -15,7 +15,6 @@ import re
 import json
 import hashlib
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 import requests
 
@@ -33,19 +32,7 @@ PROMPT_VERSION = "flux-v1"
 LANGUAGE = "hu-HU"
 TTL_PERC = 35          # a 30 perces adatfrissítéshez igazítva: egy adatállapot
                        # = egy Gemini-hívás, utána tárolt szöveg megy ki
-GEMINI_TIMEOUT = 8     # 12 s várakozás rosszabb a látogatónak, mint a sablon
-
-# A szerver órája Renderen UTC, a data["megujulo"]["ido"] bélyegek viszont
-# budapesti faliórát mutatnak. Ezért ebben a modulban SEHOL nem hívunk
-# datetime.now()-ot közvetlenül — csak a _helyi_most()-ot.
-BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
-KUSZOB_MW = 200        # ez alatt a "hátralévő csúcs" mérési zaj, nem csúcs
-
-
-def _helyi_most():
-    """Budapesti falióra, a szerver időzónájától függetlenül.
-    Ugyanaz a helper, amit az app.py is használ."""
-    return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
+GEMINI_TIMEOUT = 12
 
 KOSZONTO = (
     "Szia, Flux vagyok, az OkosMérő energiaasszisztense. Élő energiapiaci és "
@@ -180,7 +167,7 @@ def tenyek(data, ajanlas=None):
     val = data.get("validacio") or {}
     # A CatBoost és a MAVIR összevetése CSAK lezárt, teljes napon korrekt.
     # A futó nap részleges órái nem hasonlíthatók össze, ezért kimaradnak.
-    ma_str = str(_helyi_most().date())          # budapesti nap, nem a szerveré
+    ma_str = str(datetime.now().date())
     lezart = next((n for n in (val.get("napok") or [])
                    if n.get("nap") != ma_str and (n.get("orak") or 0) >= 20), None)
     if lezart:
@@ -227,8 +214,7 @@ def tenyek(data, ajanlas=None):
     meg = data.get("megujulo") or {}
     if meg.get("fc_nap") and meg.get("fc_szel"):
         idok = meg.get("ido") or []
-        # A futó óra MÁR NEM jövő: 20:40-kor a 20:00-s sor a múlté.
-        most_ora = _helyi_most().replace(minute=0, second=0, microsecond=0)
+        most_ts = datetime.now()
         jovo_nap, mult_nap = [], []
         for i, iso in enumerate(idok):
             if i >= len(meg["fc_nap"]):
@@ -237,13 +223,13 @@ def tenyek(data, ajanlas=None):
                 t = datetime.fromisoformat(iso)
             except Exception:
                 continue
-            (jovo_nap if t > most_ora else mult_nap).append(float(meg["fc_nap"][i]))
+            (jovo_nap if t > most_ts else mult_nap).append(float(meg["fc_nap"][i]))
 
         mg = {"nap_mai_csucs_mw": _kerekit(max(meg["fc_nap"])),
               "szel_mai_csucs_mw": _kerekit(max(meg["fc_szel"]))}
         # A "várható" szó CSAK a hátralévő órákra igaz. Este a napelemes
         # termelés már lecsengett, ilyenkor múlt időben beszélünk róla.
-        if jovo_nap and max(jovo_nap) >= KUSZOB_MW:
+        if jovo_nap and max(jovo_nap) > 50:
             mg["nap_hatralevo_csucs_mw"] = _kerekit(max(jovo_nap))
         else:
             mg["nap_termeles_mara_lezarult"] = True
@@ -354,7 +340,7 @@ def _ido(iso):
         t = datetime.fromisoformat(iso)
     except Exception:
         return ""
-    ma = _helyi_most().date()
+    ma = datetime.now().date()
     if t.date() == ma:
         return t.strftime("%H:%M")
     if (t.date() - ma).days == 1:
@@ -712,39 +698,12 @@ def _kereses_a_sajat_szovegekben(kerdes, uzenetek):
     return None
 
 
-def _elozmeny_szoveg(elozmeny):
-    """Az utolsó néhány kérdés-válasz pár a promptba, hogy a visszakérdezés
-    ('és holnap?') is értelmezhető legyen."""
-    if not elozmeny:
-        return ""
-    sorok = []
-    for u in elozmeny[-6:]:
-        if not u or not u.get("sor"):
-            continue
-        ki = "Látogató" if u.get("szerep") == "latogato" else "Flux"
-        sorok.append(f"{ki}: {str(u['sor'])[:300]}")
-    if not sorok:
-        return ""
-    return ("A beszélgetés eddigi menete (csak a szövegkörnyezet miatt kapod; "
-            "az adatok forrása továbbra is KIZÁRÓLAG a fenti JSON):\n"
-            + "\n".join(sorok) + "\n\n")
-
-
-def valasz(kerdes, data, ajanlas=None, elozmeny=None):
-    """A látogató kérdésére adott egyetlen válasz.
-
-    A visszaadott dict 'allapot' mezője megmondja, HONNAN jött a szöveg:
-      'gemini'     — a modell válasza, ellenőrzésen átment,
-      'kozeli'     — nem sikerült válaszolni, a saját mondataink közül a
-                     kérdéshez legközelebbi megy ki (a felület ezt kiírja),
-      'nincs_adat' — a kérdés témájához nincs élő mező.
-    Így a felület nem tehet úgy, mintha a sablon közvetlen válasz lenne.
-    """
+def valasz(kerdes, data, ajanlas=None):
+    """A látogató kérdésére adott egyetlen válasz. Ellenőrzésen bukás esetén őszinte nemet mond."""
     f, _ = tenyek(data, ajanlas)
     nem_tudom = {"sor": "Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre "
-                        "pontos válasz. Kérdezz az árakról, a fogyasztásról, a nap- és "
-                        "széltermelésről vagy a szokatlan órákról.",
-                 "szam": None, "cimke": None, "allapot": "nincs_adat"}
+                        "pontos válasz.",
+                 "szam": None, "cimke": None}
     if f is None or not str(kerdes).strip():
         return nem_tudom
     sajat = sablon_uzenetek(f)
@@ -752,31 +711,19 @@ def valasz(kerdes, data, ajanlas=None, elozmeny=None):
         prompt = (
             "Élő adatok:\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
-            f"{_elozmeny_szoveg(elozmeny)}"
             f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
             "Válaszolj EGY megállapítással ugyanabban a formában "
-            "('sor', 'szam', 'cimke'). A 'sor' KÖZVETLENÜL a kérdésre feleljen, "
-            "első mondatában. Használd a 'megujulok', 'fogyasztas', 'dam', "
+            "('sor', 'szam', 'cimke'). Használd a 'megujulok', 'fogyasztas', 'dam', "
             "'toltes', 'kartyak', 'modell_pontossag' és 'adatminoseg' mezőket. "
             "Ha az időpont nem mai, írd ki, hogy holnapi. "
-            "Ha a 'megujulok' mezőben 'nap_termeles_mara_lezarult' szerepel, a "
-            "napelemes termelésről MÚLT időben beszélj. "
             "Csak akkor mondd, hogy nem tudsz válaszolni, ha a kérdés témájához "
             "TÉNYLEG nincs mező az adatokban."
         )
         v = _gemini(prompt, _UZENET_SEMA)
         jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
         if jo:
-            valasz_dict = dict(jo[0])
-            valasz_dict["allapot"] = "gemini"
-            return valasz_dict
+            return jo[0]
         print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
-
-    kozeli = _kereses_a_sajat_szovegekben(kerdes, sajat)
-    if kozeli:
-        kozeli = dict(kozeli)
-        kozeli["allapot"] = "kozeli"
-        return kozeli
-    return nem_tudom
+    return _kereses_a_sajat_szovegekben(kerdes, sajat) or nem_tudom

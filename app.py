@@ -14,7 +14,6 @@ import threading
 import math
 from datetime import datetime, timedelta
 from io import StringIO
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from statsmodels.tsa.seasonal import STL
 import holidays
@@ -33,19 +32,6 @@ app = dash.Dash(__name__,
     meta_tags=[{"name":"viewport","content":"width=device-width,initial-scale=1"}])
 app.title = "OkosMérő"
 server = app.server
-
-# A Dash tartalom-lenyomatot fűz az assetekhez (?m=…), ezért a hosszú lejárat
-# biztonságos: új fájl = új URL. Visszatérő látogatónál a hero-kép és a
-# KPI-hátterek nem töltődnek le újra.
-server.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
-
-
-@server.after_request
-def _statikus_cache(valasz):
-    from flask import request
-    if request.path.startswith("/assets/"):
-        valasz.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    return valasz
 
 # Gzip-tömörítés: a Plotly és a Dash JS-csomagok így töredék méretben
 # érkeznek meg — mobilneten ez a betöltés legnagyobb tétele.
@@ -522,12 +508,10 @@ def model_predict(X_df):
 # semmit.
 # ============================================================
 CACHE = {}
-CACHE_LOCK = threading.Lock()   # a nyolc forrás párhuzamosan ír a polcra
 
 def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
     most = time.time()
-    with CACHE_LOCK:
-        rec = CACHE.get(kulcs)
+    rec = CACHE.get(kulcs)
     friss = (rec is not None and not force
              and (most - rec["ido"]) < ttl_sec
              and (gen is None or rec.get("gen") == gen))
@@ -538,15 +522,15 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
     # látogató fölöslegesen várna, holott van mit megjeleníteni.
     max_kiserlet = ujra if rec is None else 1
     ertek = None
+    utolso_hiba = None
     for kiserlet in range(1, max_kiserlet + 1):
         try:
             ertek = fn()
         except Exception as e:
             print(f"[HIBA] {kulcs} lekérés ({kiserlet}.): {e}", flush=True)
-            ertek = None
+            ertek, utolso_hiba = None, e
         if ertek is not None and ertek[ok_index]:
-            with CACHE_LOCK:
-                CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
+            CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
             return ertek
         if kiserlet < max_kiserlet:
             time.sleep(1.0)
@@ -555,7 +539,9 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
         print(f"[CACHE] {kulcs}: friss hívás sikertelen, korábbi jó adat "
               f"({int((most-rec['ido'])/60)} perce)", flush=True)
         return rec["ertek"]
-    return ertek if ertek is not None else fn()
+    if ertek is None and utolso_hiba is not None:
+        raise utolso_hiba
+    return ertek
 
 def _helyi_most():
     """Budapesti falióra, a szerver saját időzónájától függetlenül."""
@@ -1104,14 +1090,9 @@ def _rgba(hex_color, alpha):
         return f"rgba(255,255,255,{alpha})"
 
 def _mini_sparkline(trend, szin, jelolt_i=None):
-    """A fehér karika ARRA a pontra kerül, amelyiket a kártya nagy száma
-    mutat. Vonal: lineáris, nem spline — a spline a 36px-es sávban
-    ellapította a csúcsot, ezért tűnt minden nap egyformának.
-
-    A rajz SVG (adat-URI háttér), NEM dcc.Graph. Amíg Graph volt a kezdő
-    nézetben, a Dash a főoldalra is behúzta a teljes plotly.js darabot két
-    40 pixeles vonalért. A geometria megegyezik a Plotly-változattal:
-    y-tartomány = [min - pad, max + pad], pad = 8% vagy 0.5."""
+    """A fehér karika ARRA a pontra kerül, amelyiket a kártya nagy
+    száma mutat. Vonal: lineáris, nem spline — a spline a 36px-es
+    sávban ellapította a csúcsot, ezért tűnt minden nap egyformának."""
     if trend is None:
         return None
     try:
@@ -1122,48 +1103,25 @@ def _mini_sparkline(trend, szin, jelolt_i=None):
         return None
     if jelolt_i is not None and not (0 <= jelolt_i < len(y)):
         jelolt_i = None
-
     ymin, ymax = min(y), max(y)
     pad = max((ymax - ymin) * 0.08, 0.5)
-    lo, hi = ymin - pad, ymax + pad
-    sav = (hi - lo) or 1.0
-
-    SZ, MA = 100.0, 36.0      # viewBox; preserveAspectRatio="none" nyújtja
-    n = len(y)
-
-    def _px(i):
-        return i / (n - 1) * SZ
-
-    def _py(v):
-        return MA - (v - lo) / sav * MA
-
-    pontok = " ".join(f"{_px(i):.2f},{_py(v):.2f}" for i, v in enumerate(y))
-    terulet = f"0,{MA:.2f} " + pontok + f" {SZ:.2f},{MA:.2f}"
-
-    jelolo = ""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(y=y, mode="lines",
+        line=dict(color=szin, width=2.1),
+        fill="tozeroy", fillcolor=_rgba(szin, 0.055),
+        hoverinfo="skip", showlegend=False))
     if jelolt_i is not None:
-        jelolo = (f'<circle cx="{_px(jelolt_i):.2f}" cy="{_py(y[jelolt_i]):.2f}" '
-                  f'r="3.5" fill="{szin}" stroke="rgba(255,255,255,.78)" '
-                  f'stroke-width="1.1" vector-effect="non-scaling-stroke"/>')
-
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SZ:.0f} {MA:.0f}" '
-        f'preserveAspectRatio="none">'
-        f'<polygon points="{terulet}" fill="{_rgba(szin, 0.055)}"/>'
-        f'<polyline points="{pontok}" fill="none" stroke="{szin}" '
-        f'stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" '
-        f'vector-effect="non-scaling-stroke"/>'
-        f'{jelolo}'
-        f'</svg>'
-    )
-
-    return html.Div(style={
-        "position": "absolute", "left": "13px", "right": "13px", "bottom": "10px",
-        "height": "36px", "zIndex": "2", "pointerEvents": "none",
-        "backgroundImage": f'url("data:image/svg+xml,{quote(svg, safe="")}")',
-        "backgroundRepeat": "no-repeat",
-        "backgroundSize": "100% 100%",
-    })
+        fig.add_trace(go.Scatter(x=[jelolt_i], y=[y[jelolt_i]], mode="markers",
+            marker=dict(size=7, color=szin, line=dict(width=1.1, color="rgba(255,255,255,.78)")),
+            hoverinfo="skip", showlegend=False))
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0,r=0,t=0,b=0), height=36,
+        xaxis=dict(visible=False, fixedrange=True),
+        yaxis=dict(visible=False, fixedrange=True, range=[ymin-pad, ymax+pad]),
+        showlegend=False)
+    return dcc.Graph(figure=fig, config={"displayModeBar": False, "staticPlot": True},
+        style={"position":"absolute","left":"13px","right":"13px","bottom":"10px",
+               "height":"36px","zIndex":"2","pointerEvents":"none"})
 
 # A 3. kártya (Budapest-sziluett) és a 4. (EUR-hullám) képét a layout.css
 # ::after rétege rajzolja, `background-size: 98% auto` / `100% auto` mérettel.
@@ -1338,17 +1296,21 @@ app.layout = html.Div([
 
         dcc.Store(id="oldal",data="fooldal"),
         dcc.Store(id="adatok",data=None),
-        dcc.Store(id="adatok-lassu",data=None),
         dcc.Store(id="flux-uzenetek",data=None),
-        dcc.Store(id="flux-beszelgetes",data=None),
-        dcc.Store(id="flux-fut",data=None),
+        dcc.Store(id="flux-valasz",data=None),
         dcc.Store(id="flux-noop",data=None),
     ],className="app-main")
 ],className="app-shell")
 
-def adatcsomag(manual=False):
-    """Az élő adatcsomag előállítása. Callbacktől függetlenül hívható, hogy
-    az indulás utáni előmelegítő szál is fel tudja tölteni a gyorsítótárat."""
+@callback(Output("adatok","data"),
+    [Input("refresh","n_intervals"),Input("manual-refresh","n_clicks")],
+    running=[
+        (Output("manual-refresh","disabled"),True,False),
+        (Output("manual-refresh","children"),"Frissítés…","Frissítés"),
+    ])
+def fetch(n,_manual):
+    manual = dash.ctx.triggered_id == "manual-refresh"
+
     if bundle is None:
         return {"kritikus_hiba":True,"hianyzo":[],"modell_hiba":MODELL_HIBA}
 
@@ -1359,46 +1321,16 @@ def adatcsomag(manual=False):
     gen_aukcio = f"{gen_nap}|{'pm' if most.hour >= 14 else 'am'}"
     gen_ora = f"{most:%Y-%m-%d-%H}"
 
-    # A nyolc forrás egymástól független, ezért PÁRHUZAMOSAN kérjük le őket:
-    # a látogató a leglassabb forrás idejét várja, nem a nyolc idő összegét.
-    # A cachelt() logikája változatlan — csak nem sorban hívjuk.
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        job = {
-            "ecb": ex.submit(cachelt, "ecb", 6*3600, get_eur_huf, 1,
-                             gen=gen_nap, force=manual),
-            "idojaras": ex.submit(cachelt, "idojaras", 3600, get_idojaras_barmelyik, 2,
-                                  gen=gen_ora, force=manual),
-            "dam": ex.submit(cachelt, "dam", 1800, get_dam, 1,
-                             gen=gen_aukcio, force=manual),
-            "load": ex.submit(cachelt, "load", 3600, get_load, 1,
-                              gen=gen_ora, force=manual),
-            "load_forecast": ex.submit(cachelt, "load_forecast", 3600, get_load_forecast, 1,
-                                       gen=gen_aukcio, force=manual),
-            "napszelfc": ex.submit(cachelt, "napszelfc", 3600, get_naposzel_fc, 1,
-                                   gen=gen_aukcio, force=manual),
-            "homerseklet": ex.submit(cachelt, "homerseklet", 1800, get_ho_barmelyik, 1,
-                                     gen=gen_ora, force=manual),
-            "termeles": ex.submit(cachelt, "termeles", 1800, get_termeles, 1,
-                                  gen=gen_ora, force=manual),
-        }
-
-        def _eredmeny(kulcs, alap):
-            """Egy forrás hibája ne dőljön rá az egész lekérésre: az adott
-            forrás 'nem elérhető' lesz, a többi adat viszont megjelenik."""
-            try:
-                return job[kulcs].result()
-            except Exception as e:
-                print(f"[HIBA] {kulcs} szál: {e}", flush=True)
-                return alap
-
-        eur_huf,eur_ok = _eredmeny("ecb", (None, False))
-        ido_df,daily,ido_ok,ido_forras = _eredmeny("idojaras", (None, None, False, None))
-        dam,dam_ok = _eredmeny("dam", (None, False))
-        load,load_ok = _eredmeny("load", (None, False))
-        mavir_fc,mavir_fc_ok = _eredmeny("load_forecast", (None, False))
-        fcs,fc_ok = _eredmeny("napszelfc", (None, False))
-        aho,ho_ok = _eredmeny("homerseklet", (None, False))
-        term,term_ok = _eredmeny("termeles", (None, False))
+    eur_huf,eur_ok = cachelt("ecb", 6*3600, get_eur_huf, 1, gen=gen_nap, force=manual)
+    ido_df,daily,ido_ok,ido_forras = cachelt("idojaras", 3600, get_idojaras_barmelyik, 2,
+                                             gen=gen_ora, force=manual)
+    dam,dam_ok = cachelt("dam", 1800, get_dam, 1, gen=gen_aukcio, force=manual)
+    load,load_ok = cachelt("load", 3600, get_load, 1, gen=gen_ora, force=manual)
+    mavir_fc,mavir_fc_ok = cachelt("load_forecast", 3600, get_load_forecast, 1,
+                                   gen=gen_aukcio, force=manual)
+    fcs,fc_ok = cachelt("napszelfc", 3600, get_naposzel_fc, 1, gen=gen_aukcio, force=manual)
+    aho,ho_ok = cachelt("homerseklet", 1800, get_ho_barmelyik, 1, gen=gen_ora, force=manual)
+    term,term_ok = cachelt("termeles", 1800, get_termeles, 1, gen=gen_ora, force=manual)
 
     hianyzo = []
     if not dam_ok: hianyzo.append("ENTSO-E (DAM árak)")
@@ -1474,63 +1406,6 @@ def adatcsomag(manual=False):
         except Exception as e:
             print(f"[HIBA] Megújuló idősor: {e}", flush=True)
 
-    # Az STL-dekompozíció, az anomália-naplózás és a validációs lekérdezés
-    # NEM ide tartozik: azokat a lassu_adatcsomag() végzi, egy külön
-    # callbackben, hogy a KPI-sáv és a hero ne várjon rájuk.
-
-    mert = None
-    heti_atlag = None
-    if load_ok:
-        mert = {"ertek":float(load.iloc[-1]),"idopont":load.index.max().strftime("%H:%M")}
-        try:
-            u7 = load.tail(7*24)
-            heti_atlag = [float(u7[u7.index.hour == o].mean()) for o in range(24)]
-        except Exception as e:
-            print(f"[HIBA] Heti átlag: {e}", flush=True)
-
-    return {
-        "eredm":eredm,
-        "ablak_h":ablak_h,
-        "eur_huf":eur_huf if eur_ok else None,
-        "negyed":dam["negyed"],
-        "dam_ma_oras":dam["ma_oras"],
-        "holnapi_ar":dam["holnapi_ar"],
-        "ido_forras":ido_forras if ido_ok else None,
-        "aho":aho if ho_ok else None,
-        "mert_fogyasztas":mert,
-        "heti_atlag":heti_atlag,
-        "megujulo":megujulo,
-        "daily":daily if ido_ok else None,
-        "frissites":most.strftime("%H:%M:%S"),
-        "frissites_tipus":"kézi" if manual else "automatikus",
-        "fb":{"ENTSO-E":not (dam_ok and load_ok and fc_ok),"Időjárás":not ido_ok,"ECB":not eur_ok},
-        "hianyzo":hianyzo}
-
-def lassu_adatcsomag(data, manual=False):
-    """A megjelenítés szempontjából NEM kritikus munka: STL-dekompozíció,
-    anomália- és előrejelzés-naplózás, validációs lekérdezés.
-
-    Külön callbackben fut, az `adatok` store megérkezése UTÁN, ezért a
-    KPI-sáv és a hero már látszik, amíg ez dolgozik. A forrásadatokat a
-    CACHE-ből veszi — az itteni cachelt() hívások hálózatot nem érintenek,
-    mert az adatcsomag() néhány ezredmásodperccel korábban feltöltötte.
-    """
-    if not data or data.get("kritikus_hiba"):
-        return {"stl": None, "stl_napok": 0, "validacio": None}
-
-    most = _helyi_most(); ma = _ma()
-    gen_nap = f"{ma:%Y-%m-%d}"
-    gen_aukcio = f"{gen_nap}|{'pm' if most.hour >= 14 else 'am'}"
-    gen_ora = f"{most:%Y-%m-%d-%H}"
-
-    load, load_ok = cachelt("load", 3600, get_load, 1, gen=gen_ora)
-    dam, dam_ok = cachelt("dam", 1800, get_dam, 1, gen=gen_aukcio)
-    ido_df, daily, ido_ok, ido_forras = cachelt("idojaras", 3600,
-                                                get_idojaras_barmelyik, 2, gen=gen_ora)
-    mavir_fc, mavir_fc_ok = cachelt("load_forecast", 3600, get_load_forecast, 1,
-                                    gen=gen_aukcio)
-    dam_oras = {pd.Timestamp(k): v for k, v in dam["oras"].items()} if dam_ok else {}
-
     stl_data = None
     stl_napok = 0
     if load_ok:
@@ -1555,60 +1430,60 @@ def lassu_adatcsomag(data, manual=False):
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
+    mert = None
+    heti_atlag = None
+    if load_ok:
+        mert = {"ertek":float(load.iloc[-1]),"idopont":load.index.max().strftime("%H:%M")}
+        try:
+            u7 = load.tail(7*24)
+            heti_atlag = [float(u7[u7.index.hour == o].mean()) for o in range(24)]
+        except Exception as e:
+            print(f"[HIBA] Heti átlag: {e}", flush=True)
+
     mavir_forecast = ({pd.Timestamp(k):float(v) for k,v in mavir_fc.items()}
                       if mavir_fc_ok else {})
 
     # 1) Először a már lezárt órák kerülnek a végleges forecast_log táblába.
     # Ezeket a modell a celablak() logikája miatt többé nem jósolja újra.
     if load_ok:
-        try:
-            if mavir_forecast:
-                fill_missing_pending_mavir(mavir_forecast)
-            finalize_completed_forecasts(load, most)
-        except Exception as e:
-            print(f"[HIBA] Forecast lezárás: {e}", flush=True)
+        if mavir_forecast:
+            fill_missing_pending_mavir(mavir_forecast)
+        finalize_completed_forecasts(load, most)
 
     # 2) A még jövőbeli célórák csak az ideiglenes pending táblába kerülnek.
-    eredm = data.get("eredm")
+    # Célóránként egy sor van, amelyet az újraszámolás addig frissíthet,
+    # amíg meg nem érkezik az adott óra lezárt tényadata.
     if eredm:
-        try:
-            input_quality_label = "complete" if not data.get("hianyzo") else "degraded"
-            save_pending_forecasts(
-                forecast=eredm,
-                generated_at=most,
-                input_quality_label=input_quality_label,
-                stl_anomaly_lag_count=(stl_data or {}).get("anomalia_db", 0),
-                source_type="manual" if manual else "automatic",
-                mavir_forecast=mavir_forecast,
-            )
-        except Exception as e:
-            print(f"[HIBA] Pending mentés: {e}", flush=True)
-
-    try:
-        validacio = get_validacio_adatok()
-    except Exception as e:
-        print(f"[HIBA] Validáció: {e}", flush=True)
-        validacio = None
-
-    return {"stl": stl_data, "stl_napok": stl_napok, "validacio": validacio}
-
-
-@callback(Output("adatok","data"),
-    [Input("refresh","n_intervals"),Input("manual-refresh","n_clicks")],
-    running=[
-        (Output("manual-refresh","disabled"),True,False),
-        (Output("manual-refresh","children"),"Frissítés…","Frissítés"),
-    ])
-def fetch(n,_manual):
-    return adatcsomag(manual=(dash.ctx.triggered_id == "manual-refresh"))
-
-
-@callback(Output("adatok-lassu","data"),
-    Input("adatok","data"),
-    prevent_initial_call=True)
-def fetch_lassu(data):
-    """Az STL és a naplózás a hero megjelenése UTÁN fut le."""
-    return lassu_adatcsomag(data)
+        input_quality_label = "complete" if not hianyzo else "degraded"
+        save_pending_forecasts(
+            forecast=eredm,
+            generated_at=most,
+            input_quality_label=input_quality_label,
+            stl_anomaly_lag_count=(stl_data or {}).get("anomalia_db", 0),
+            source_type="manual" if manual else "automatic",
+            mavir_forecast=mavir_forecast,
+        )
+    validacio = get_validacio_adatok()
+    return {
+        "eredm":eredm,
+        "validacio":validacio,
+        "ablak_h":ablak_h,
+        "eur_huf":eur_huf if eur_ok else None,
+        "negyed":dam["negyed"],
+        "dam_ma_oras":dam["ma_oras"],
+        "holnapi_ar":dam["holnapi_ar"],
+        "ido_forras":ido_forras if ido_ok else None,
+        "aho":aho if ho_ok else None,
+        "mert_fogyasztas":mert,
+        "heti_atlag":heti_atlag,
+        "megujulo":megujulo,
+        "stl":stl_data,
+        "stl_napok":stl_napok,
+        "daily":daily if ido_ok else None,
+        "frissites":most.strftime("%H:%M:%S"),
+        "frissites_tipus":"kézi" if manual else "automatikus",
+        "fb":{"ENTSO-E":not (dam_ok and load_ok and fc_ok),"Időjárás":not ido_ok,"ECB":not eur_ok},
+        "hianyzo":hianyzo}
 
 @callback(Output("oldal","data"),
     [Input(f"nav-{x}","n_clicks")
@@ -1640,13 +1515,6 @@ def _kpi_or_szin(data):
     return C['yw'] if ny <= 2 else C['or']
 
 
-# A három javasolt kérdés a chipeken. Kattintásra azonnal elküldi magát.
-FLUX_JAVASLATOK = [
-    "Mikor a legolcsóbb ma az áram?",
-    "Mennyi napenergia jön még ma?",
-    "Volt ma szokatlan óra?",
-]
-
 NB = {"display":"flex","alignItems":"center","justifyContent":"center",
     "padding":"14px 12px","cursor":"pointer","transition":"all 0.2s","background":"transparent"}
 
@@ -1656,8 +1524,8 @@ NB = {"display":"flex","alignItems":"center","justifyContent":"center",
     Output("nav-fooldal","style"),Output("nav-toltes","style"),
     Output("nav-elemzes","style"),Output("nav-megujulok","style"),
     Output("nav-mllabor","style")],
-    [Input("adatok","data"),Input("adatok-lassu","data"),Input("oldal","data")])
-def render(data,lassu,oldal):
+    [Input("adatok","data"),Input("oldal","data")])
+def render(data,oldal):
     ns=[{**NB,"color":C['gr'],"borderBottom":f"2px solid {C['gr']}"} if oldal==x
         else {**NB,"color":C['mut'],"borderBottom":"2px solid transparent"}
         for x in ["fooldal","toltes","elemzes","megujulok","mllabor"]]
@@ -1674,13 +1542,6 @@ def render(data,lassu,oldal):
     if data is None:
         return (html.Div("Élő adatok betöltése...",style={"color":C['yw']}),
             html.Div(),html.Div(),html.Div(),modell_info,*ns)
-
-    # Az STL és a validáció külön lépcsőben érkezik; ha már megjött,
-    # beolvasztjuk, így minden alatta lévő kód változatlanul működik.
-    data = {**data, **{k: v for k, v in (lassu or {}).items() if v is not None}}
-    data.setdefault("stl", None)
-    data.setdefault("stl_napok", 0)
-    data.setdefault("validacio", None)
 
     if data.get("kritikus_hiba"):
         statusz = html.Div([
@@ -1804,8 +1665,7 @@ def nyitooldal():
         html.Div([
             html.Span(id="flux-szoveg"),
             html.Span(className="flux-kurzor")
-        ],className="flux-ambient",
-          style={"minHeight":"84px","color":"#dbe7f2","fontSize":"15px","lineHeight":"1.7",
+        ],style={"minHeight":"84px","color":"#dbe7f2","fontSize":"15px","lineHeight":"1.7",
                  "textWrap":"pretty"}),
 
         html.Div([
@@ -1815,29 +1675,14 @@ def nyitooldal():
                                             "letterSpacing":"1.4px","textTransform":"uppercase"})
         ],id="flux-szam-doboz",style={"display":"none","flexDirection":"column","gap":"4px"}),
 
-        # A beszélgetés átirata. Üresen nem foglal helyet; az első kérdésre
-        # jelenik meg, és ilyenkor a körbejáró súgógép megáll (flux.js).
-        html.Div(id="flux-atirat",className="flux-atirat"),
-
-        html.Div([
-            dcc.Input(id="flux-kerdes",type="text",debounce=False,
-                      placeholder="Kérdezz Fluxtól…",className="flux-kerdes"),
-            html.Button("KÜLDÉS",id="flux-kuld",n_clicks=0,className="flux-kuld"),
-        ],className="flux-kerdes-sor"),
-
-        html.Div([
-            html.Button(sz,id=f"flux-javaslat-{i}",n_clicks=0,className="flux-chip")
-            for i, sz in enumerate(FLUX_JAVASLATOK)
-        ],className="flux-chipsor"),
+        dcc.Input(id="flux-kerdes",type="text",debounce=False,
+                  placeholder="Kérdezz Fluxtól…",className="flux-kerdes"),
 
     ],className="flux-reteg")
 
     return html.Div([
-        # WebP: 1 476 657 byte helyett ~48 KB, azonos megjelenítési méretben.
-        # A width/height előre lefoglalja a képarányt, így a Flux-szöveg nem ugrik.
-        html.Img(src=dash.get_asset_url("hero-grid.webp"),
+        html.Img(src=dash.get_asset_url("hero-grid.png"),
                  alt="Villamosenergia-hálózat", className="hero-kep",
-                 width=1470, height=578,
                  style={"display":"block","width":"100%","height":"auto"}),
         flux_reteg
     ], className="hero-panel",
@@ -1848,14 +1693,13 @@ def nyitooldal():
 
 # ---- Flux: szövegek az élő adatokból (Gemini a szerveren, flux.py) ----
 @callback(Output("flux-uzenetek","data"),
-    [Input("adatok","data"),Input("adatok-lassu","data")],
+    Input("adatok","data"),
     prevent_initial_call=False)
-def flux_szovegek(data, lassu):
+def flux_szovegek(data):
     if not data or data.get("kritikus_hiba"):
         return [{"sor":"Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
                  "szam":None,"cimke":None}]
     try:
-        data = {**data, **{k: v for k, v in (lassu or {}).items() if v is not None}}
         aj = toltes_ajanlas(data["negyed"]) if data.get("negyed") else None
         return flux.uzenetek(data, aj)
     except Exception as e:
@@ -1863,111 +1707,21 @@ def flux_szovegek(data, lassu):
         return [{"sor":flux.KOSZONTO,"szam":None,"cimke":None}]
 
 
-# ---- Flux: a látogató kérdése — VALÓDI BESZÉLGETÉS ----
-#
-# Két lépcső, szándékosan:
-#   1) a kérdés AZONNAL bekerül az átiratba, és megjelenik a "gondolkodik"
-#      buborék — a látogató 100 ms-on belül lát visszajelzést,
-#   2) csak utána indul a (lassú) Gemini-hívás, és cseréli le a buborékot.
-# Így nem fordulhat elő, hogy a kérdés után 8 másodpercig más mondatok futnak.
-
-@callback([Output("flux-beszelgetes","data",allow_duplicate=True),
-           Output("flux-fut","data"),
-           Output("flux-kerdes","value")],
-    [Input("flux-kerdes","n_submit"),Input("flux-kuld","n_clicks")] +
-    [Input(f"flux-javaslat-{i}","n_clicks") for i in range(len(FLUX_JAVASLATOK))],
-    [State("flux-kerdes","value"),State("flux-beszelgetes","data")],
+# ---- Flux: a látogató kérdése ----
+@callback([Output("flux-valasz","data"),Output("flux-kerdes","value")],
+    Input("flux-kerdes","n_submit"),
+    [State("flux-kerdes","value"),State("adatok","data")],
     prevent_initial_call=True)
-def flux_kerdes_indit(_n_submit, _n_kuld, *args):
-    csevej = args[-1] or []
-    kerdes = args[-2]
-    javaslat_kattintasok = args[:-2]
-
-    # Javaslat-chipre kattintva a chip felirata a kérdés.
-    trig = dash.ctx.triggered_id
-    if isinstance(trig, str) and trig.startswith("flux-javaslat-"):
-        try:
-            kerdes = FLUX_JAVASLATOK[int(trig.rsplit("-", 1)[1])]
-        except (ValueError, IndexError):
-            return dash.no_update, dash.no_update, dash.no_update
-
+def flux_kerdes(_n, kerdes, data):
     if not kerdes or not str(kerdes).strip():
-        return dash.no_update, dash.no_update, dash.no_update
-
-    kerdes = str(kerdes).strip()[:300]
-    uj = list(csevej)[-8:] + [
-        {"szerep": "latogato", "sor": kerdes},
-        {"szerep": "flux", "sor": None, "varakozik": True},
-    ]
-    return uj, {"kerdes": kerdes, "ido": time.time()}, ""
-
-
-@callback(Output("flux-beszelgetes","data",allow_duplicate=True),
-    Input("flux-fut","data"),
-    [State("flux-beszelgetes","data"),State("adatok","data"),
-     State("adatok-lassu","data")],
-    prevent_initial_call=True)
-def flux_valasz_keszit(fut, csevej, data, lassu):
-    """A tényleges válasz. A várakozó buborékot cseréli le."""
-    if not fut or not csevej:
-        return dash.no_update
+        return dash.no_update, dash.no_update
     try:
-        d = {**(data or {}), **{k: v for k, v in (lassu or {}).items() if v is not None}}
-        aj = toltes_ajanlas(d["negyed"]) if d.get("negyed") else None
-        # Az előzmény az utolsó három lezárt kérdés-válasz pár: ettől lehet
-        # visszakérdezni ("és holnap?"), nem indul minden kérdés nulláról.
-        elozmeny = [u for u in csevej if not u.get("varakozik")][-6:]
-        v = flux.valasz(fut.get("kerdes"), d, aj, elozmeny=elozmeny)
+        aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
+        return flux.valasz(kerdes, data, aj), ""
     except Exception as e:
         print(f"[FLUX] Kérdés callback: {e}", flush=True)
-        v = {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
-             "szam":None,"cimke":None,"allapot":"hiba"}
-
-    uj = list(csevej)
-    for i in range(len(uj) - 1, -1, -1):
-        if uj[i].get("varakozik"):
-            uj[i] = {"szerep":"flux","varakozik":False,
-                     "sor":v.get("sor"),"szam":v.get("szam"),
-                     "cimke":v.get("cimke"),"allapot":v.get("allapot","gemini")}
-            break
-    return uj
-
-
-@callback(Output("flux-atirat","children"),
-    Input("flux-beszelgetes","data"))
-def flux_atirat(csevej):
-    """A beszélgetés kirajzolása: kérdés jobbra, válasz balra."""
-    if not csevej:
-        return None
-    elemek = []
-    for u in csevej[-6:]:
-        if u.get("szerep") == "latogato":
-            elemek.append(html.Div(u.get("sor",""),className="flux-buborek flux-kerdes-buborek"))
-            continue
-        if u.get("varakozik"):
-            elemek.append(html.Div([
-                html.Span("Flux átnézi az élő adatokat"),
-                html.Span(className="flux-pont"),
-                html.Span(className="flux-pont"),
-                html.Span(className="flux-pont"),
-            ],className="flux-buborek flux-varakozik"))
-            continue
-        allapot = u.get("allapot") or "gemini"
-        # Ha az ellenőrzés nem engedte át a modell válaszát, ezt kiírjuk:
-        # a sablonmondat ne tegyen úgy, mintha közvetlen válasz lenne.
-        fejlec = None
-        if allapot in ("kozeli", "nincs_adat", "hiba"):
-            fejlec = html.Div("Erre nincs pontos élő adatom — ez áll hozzá a legközelebb:",
-                              className="flux-fejlec")
-        elemek.append(html.Div([
-            fejlec,
-            html.Div(u.get("sor",""),className="flux-valasz-sor"),
-            html.Div([
-                html.Span(u.get("szam") or "",className="flux-valasz-szam"),
-                html.Span(u.get("cimke") or "",className="flux-valasz-cimke"),
-            ],className="flux-valasz-ertek") if u.get("szam") else None,
-        ],className="flux-buborek flux-valasz-buborek"))
-    return elemek
+        return {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
+                "szam":None,"cimke":None}, ""
 
 
 # ---- Flux: az adatok átadása a böngészőnek ----
@@ -1975,19 +1729,14 @@ def flux_atirat(csevej):
 # (15 mp-es óra, fülváltás) nem szakítja meg és nem kezdi elölről a szöveget.
 app.clientside_callback(
     """
-    function(uzenetek, csevej) {
-        window.FLUX_DATA = {
-            uzenetek: uzenetek || [],
-            // Amint van beszélgetés, a körbejáró súgógép elhallgat: a
-            // látogató a saját kérdésére adott választ olvassa, nem mást.
-            csevegesAktiv: !!(csevej && csevej.length)
-        };
+    function(uzenetek, valasz) {
+        window.FLUX_DATA = {uzenetek: uzenetek || [], valasz: valasz || null};
         if (window.fluxIndit) window.fluxIndit();
         return window.dash_clientside.no_update;
     }
     """,
     Output("flux-noop","data"),
-    [Input("flux-uzenetek","data"),Input("flux-beszelgetes","data")],
+    [Input("flux-uzenetek","data"),Input("flux-valasz","data")],
 )
 
 # ============================================================
@@ -3010,21 +2759,6 @@ def mllabor(data):
             dbc.Col(_stl_ador_nagy(naplo, v.get("kategoriak")), md=12)
         ], className="g-3"),
     ])
-
-
-def _elomelegit():
-    """Indulás után azonnal feltölti a CACHE-t, hogy az első látogató már
-    meleg polcra érkezzen. A hibája nem állítja meg az alkalmazást."""
-    try:
-        d = adatcsomag()
-        lassu_adatcsomag(d)
-        print("[WARM] gyorsítótár feltöltve", flush=True)
-    except Exception as e:
-        print(f"[WARM] előmelegítés sikertelen: {e}", flush=True)
-
-
-# Minden függvény definiálva van eddig a pontig, ezért indul itt a szál.
-threading.Thread(target=_elomelegit, daemon=True).start()
 
 
 if __name__=="__main__":
