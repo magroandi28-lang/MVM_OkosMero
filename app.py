@@ -31,6 +31,14 @@ app = dash.Dash(__name__,
 app.title = "OkosMérő"
 server = app.server
 
+# Gzip-tömörítés: a Plotly és a Dash JS-csomagok így töredék méretben
+# érkeznek meg — mobilneten ez a betöltés legnagyobb tétele.
+try:
+    from flask_compress import Compress
+    Compress(server)
+except Exception as _e:
+    print(f"[INFO] Tömörítés nem aktív: {_e}", flush=True)
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY","")
 VISUAL_CROSSING_KEY = os.environ.get("VISUAL_CROSSING_KEY","")
@@ -1267,7 +1275,7 @@ app.layout = html.Div([
             html.Div(id="modell-panel")
         ],style={"display":"none"}),
         dcc.Interval(id="refresh",interval=1800*1000,n_intervals=0),
-        dcc.Interval(id="clock",interval=15*1000,n_intervals=0),
+
         dcc.Store(id="oldal",data="fooldal"),
         dcc.Store(id="adatok",data=None),
         dcc.Store(id="flux-uzenetek",data=None),
@@ -1498,8 +1506,8 @@ NB = {"display":"flex","alignItems":"center","justifyContent":"center",
     Output("nav-fooldal","style"),Output("nav-toltes","style"),
     Output("nav-elemzes","style"),Output("nav-megujulok","style"),
     Output("nav-mllabor","style")],
-    [Input("adatok","data"),Input("oldal","data"),Input("clock","n_intervals")])
-def render(data,oldal,_clock):
+    [Input("adatok","data"),Input("oldal","data")])
+def render(data,oldal):
     ns=[{**NB,"color":C['gr'],"borderBottom":f"2px solid {C['gr']}"} if oldal==x
         else {**NB,"color":C['mut'],"borderBottom":"2px solid transparent"}
         for x in ["fooldal","toltes","elemzes","megujulok","mllabor"]]
@@ -1612,9 +1620,7 @@ def render(data,oldal,_clock):
     ],className="kpi-grid", style=KPI_GRID_STYLE)
 
     if oldal=="fooldal":
-        # A 15 mp-es óra NE építse újra a nyitóoldalt: az újraépítés
-        # nullázná a Flux gépelését és visszaugrana a köszöntőre.
-        page = dash.no_update if dash.ctx.triggered_id == "clock" else nyitooldal()
+        page = nyitooldal()
     elif oldal=="toltes":
         page=fooldal(data,aj)
     elif oldal=="elemzes":
