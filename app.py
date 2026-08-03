@@ -507,7 +507,7 @@ def model_predict(X_df):
 # ============================================================
 CACHE = {}
 
-def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=3):
+def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=2):
     most = time.time()
     rec = CACHE.get(kulcs)
     friss = (rec is not None and not force
@@ -516,10 +516,11 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=3):
     if friss:
         return rec["ertek"]
 
-    # Indulás után az első hívás gyakran timeoutol (hideg kapcsolat, lassú
-    # külső API). Ilyenkor nincs korábbi jó adat, ezért újrapróbálkozunk.
+    # Újrapróbálkozás CSAK akkor, ha nincs korábbi jó adat: különben a
+    # látogató fölöslegesen várna, holott van mit megjeleníteni.
+    max_kiserlet = ujra if rec is None else 1
     ertek = None
-    for kiserlet in range(1, max(1, ujra) + 1):
+    for kiserlet in range(1, max_kiserlet + 1):
         try:
             ertek = fn()
         except Exception as e:
@@ -528,11 +529,8 @@ def cachelt(kulcs, ttl_sec, fn, ok_index, gen=None, force=False, ujra=3):
         if ertek is not None and ertek[ok_index]:
             CACHE[kulcs] = {"ido": most, "gen": gen, "ertek": ertek}
             return ertek
-        if kiserlet < max(1, ujra):
-            varakozas = 1.5 * kiserlet
-            print(f"[INFO] {kulcs}: {kiserlet}. kísérlet sikertelen, "
-                  f"újrapróbálkozás {varakozas:.0f} mp múlva", flush=True)
-            time.sleep(varakozas)
+        if kiserlet < max_kiserlet:
+            time.sleep(1.0)
 
     if rec:
         print(f"[CACHE] {kulcs}: friss hívás sikertelen, korábbi jó adat "
@@ -2763,3 +2761,4 @@ if __name__=="__main__":
     port = int(os.environ.get("PORT", 8050))
     debug = os.environ.get("DASH_DEBUG", "false").lower() == "true"
     app.run(debug=debug, host="0.0.0.0", port=port)
+
