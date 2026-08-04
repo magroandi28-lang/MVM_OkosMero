@@ -7,7 +7,7 @@
    egy pillanat alatt visszaíródik ugyanoda, ahol tartott. */
 
 (function () {
-  const FLUX_VERZIO = "2026-08-04-b";
+  const FLUX_VERZIO = "2026-08-04-d";
   const KARAKTER_MS = 35;      // ~29 karakter / másodperc — gyorsan kiírja
   const KITARTAS_MIN = 6000;   // rövid megállapítás ennyit marad kint
   const KITARTAS_MAX = 10000;  // hosszú megállapítás legfeljebb ennyit
@@ -30,7 +30,8 @@
     i: 0, k: 0, utolso: 0, varakozasKezdet: 0,
     valaszKulcs: null, valaszAktiv: false, varakozott: false,
     kezdoLatott: false, korPozicio: 0,
-    fokusz: false, gepeltUtoljara: 0, egerRajta: false,
+    fokusz: false, fokuszOta: 0, gepeltUtoljara: 0, egerRajta: false,
+    szunetKezdet: 0,
   };
 
   const el = (id) => document.getElementById(id);
@@ -133,7 +134,10 @@
      semmivel maradna, és a szünet néma módon abbamaradna. A delegált
      figyelő az elemcserét is túléli. */
   document.addEventListener("focusin", function (e) {
-    if (e.target && e.target.id === "flux-kerdes") st.fokusz = true;
+    if (e.target && e.target.id === "flux-kerdes") {
+      st.fokusz = true;
+      st.fokuszOta = Date.now();
+    }
   });
   document.addEventListener("focusout", function (e) {
     if (e.target && e.target.id === "flux-kerdes") st.fokusz = false;
@@ -146,7 +150,26 @@
                       e.target.closest(".flux-reteg"));
   });
 
+  /* Egyetlen szünet sem tarthat tovább ennél — bármi is okozza.
+
+     Külön-külön minden szünet-ok ésszerű: a mezőben áll a kurzor, épp gépel,
+     az egér a szöveg fölött van, vagy kijelölte a mondatot másoláshoz. A baj
+     az, hogy MINDEGYIK be tud ragadni: az Enter után a fókusz a mezőben marad,
+     a másolás után a kijelölés megmarad, az egér ottfelejtődik. Ilyenkor a
+     szöveg véglegesen befagy, és a látogató azt hiszi, elromlott az oldal.
+     Ezért a szünet okát nem foltozzuk egyesével, hanem az IDEJÉT korlátozzuk:
+     ennyi után a kör mindenképp folytatódik. */
+  const SZUNET_MAX = 45000;
+
   function szunetel() {
+    /* 0) A VÁLASZT semmi nem tarthatja fel.
+
+       Ez volt a hiba: Enter utan a kurzor a mezoben MARAD, tehat a lenti
+       fokusz-feltetel orokre igaznak bizonyult. A valasz kiirodott, aztan a
+       hurok megallt rajta — a szoveg percekig kint maradt, es soha nem jott
+       utana semmi. A valasz lejatszasa alatt ezert nincs szunet. */
+    if (st.valaszAktiv) return false;
+
     // 1) A mezőben áll a kurzor.
     if (st.fokusz) return true;
     // 2) Az utolsó leütés óta 8 másodpercen belül vagyunk.
@@ -172,7 +195,17 @@
 
   function hurok(most) {
     try {
+      /* A szünet mérése: amint megszűnik az ok, a mérő nullázódik. Ha viszont
+         egyfolytában tart, a felső korlát után akkor is továbblépünk. */
       if (szunetel()) {
+        if (!st.szunetKezdet) st.szunetKezdet = Date.now();
+      } else {
+        st.szunetKezdet = 0;
+      }
+      const beragadt = st.szunetKezdet &&
+                       Date.now() - st.szunetKezdet > SZUNET_MAX;
+
+      if (st.szunetKezdet && !beragadt) {
         /* Megállunk, de a félbehagyott mondatot végiggépeljük, hogy ne
            csonka szöveg maradjon a képernyőn. */
         const l = lista();
