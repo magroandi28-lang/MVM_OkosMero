@@ -55,6 +55,16 @@ LANGUAGE = "hu-HU"
 TTL_PERC = 35          # a 30 perces adatfrissítéshez igazítva: egy adatállapot
                        # = egy Gemini-hívás, utána tárolt szöveg megy ki
 GEMINI_TIMEOUT = 12         # a főoldali szöveghez (háttérben készül)
+
+# A FŐOLDALI körbejáró szöveghez kell-e nyelvi modell?
+#
+# Alapból NEM. A főoldali mondatokat a `sablon_uzenetek()` állítja elő, szintén
+# az élő adatokból, napszakhoz igazított igeidővel — csak állandóbb szerkezettel,
+# mint a Gemini. Cserébe a napi keret TELJES EGÉSZE a látogatók kérdéseire marad,
+# oda, ahol a nyelvi modell tényleg számít. Adatállapotonként egy hívás naponta
+# 40-50 kérést jelentene úgy, hogy közben senki nem kérdezett semmit.
+# Ha valaki mégis a Geminire bízná a főoldalt: FLUX_FOOLDAL_GEMINI=1
+FOOLDAL_GEMINI = os.environ.get("FLUX_FOOLDAL_GEMINI", "0") == "1"
 GEMINI_KERDES_TIMEOUT = 10  # a látogató kérdéséhez. Ez FELSŐ KORLÁT, nem
                             # várakozási idő: a modell rendszerint 2-4 mp
                             # alatt felel. Szorosabb korlátnál egy amúgy jó,
@@ -137,11 +147,28 @@ FLUX_SZEREP_KERDES = (
     "tőled az oldalon. Úgy válaszolj, mint egy segítőkész, jókedvű szakértő kolléga, "
     "aki melletted ül: magyarul, tegezve, természetes, élő mondatokban. "
     "NEM jelentést írsz, hanem beszélgetsz.\n"
-    "A válasz két-három mondat legyen ebben a menetben:\n"
-    "1) rövid emberi reakció a kérdésre (pl. 'Jó kérdés', 'Nézzük', 'Épp jókor kérded'),\n"
+    "A válasz két-négy mondat legyen:\n"
+    "1) rövid emberi reakció a kérdésre,\n"
     "2) a lényeg az élő adatokból, a számmal a mondatban,\n"
     "3) egy rövid, hasznos hozzáfűzés vagy felajánlás, hogy mit nézhet még meg.\n"
+    "HA A KÉRDÉS TÖBB DOLGOT is firtat, MINDEGYIKRE válaszolj — ne csak az "
+    "elsőre. Ha az egyikhez nincs adat, azt az egyet mondd meg őszintén.\n"
+    "KÖSZÖNÉS: csak akkor köszönj vissza, ha a látogató maga is köszön, VAGY ha "
+    "a prompt kifejezetten jelzi, hogy ez az első kérdése. Minden válaszot "
+    "'Szia!'-val kezdeni modoros — a felütés legyen változatos és a kérdéshez "
+    "illő, vagy maradjon el.\n"
     "Vedd figyelembe a napszakot: hajnalban ne úgy írj, mintha dél lenne.\n"
+    "SZAKMAI SZABADSÁG: a témán BELÜL nyugodtan légy tartalmas és önálló. "
+    "Beszélhetsz arról, mi mozgatja most a magyar és európai energiapiacot, miért "
+    "ingadoznak az árak, mit jelent a megújulók terjedése a rendszerirányításnak, "
+    "miért nehéz előre jelezni a fogyasztást. Ez szakmai kontextus, nem adat — "
+    "csak arra ügyelj, hogy KONKRÉT SZÁMOT továbbra is kizárólag a JSON-ból írhatsz.\n"
+    "TÉMAHATÁR: kizárólag az OkosMérő szolgáltatásairól és a magyar "
+    "energiahelyzetről beszélhetsz. Ha a látogató másról kérdez (recept, vicc, "
+    "politika, fordítás, bármi hétköznapi), udvariasan mondd meg, hogy ebben nem "
+    "tudsz segíteni, ehhez egy általános nyelvi asszisztens jobb választás — "
+    "aztán ajánld fel, miről tudsz beszélni. Ne találj ki választ a téma "
+    "kedvéért, és ne térj el a szakmai szereptől.\n"
     "KEMÉNY SZABÁLY, ettől soha nem térhetsz el: kizárólag a megkapott JSON "
     "adatokra támaszkodhatsz, és számot csak akkor írhatsz le, ha az pontosan "
     "szerepel az adatokban. Nem becsülsz, nem kerekítesz át, nem találsz ki semmit. "
@@ -1211,6 +1238,12 @@ def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
     allapot, model_nev, hibak = "fallback", "deterministic-template-v1", []
     vegleges = tartalek
 
+    if not FOOLDAL_GEMINI:
+        # A saját szöveg megy ki, hívás nélkül. Így a napi keret érintetlen
+        # marad a kérdésekre.
+        _memo_ir(ck, vegleges)
+        return vegleges
+
     try:
         prompt = (
             "Az alábbi JSON a magyar villamosenergia-rendszer élő adatait tartalmazza.\n"
@@ -1593,12 +1626,21 @@ def _t_frissites(f):
 
 
 # A sorrend számít: a specifikusabb minta áll elöl.
-_TEMAK = [
+# TÁRSALGÁSI témák. Ezek KÜLÖN listában vannak, és csak akkor kerülnek sorra,
+# ha egyetlen ÉRDEMI téma sem talált. Amíg egy listában voltak, a "Szia,
+# mennyi az ár?" kérdésre Flux csak visszaköszönt és felsorolta, mit tud —
+# mert a köszönés hamarabb illeszkedett, mint az ár. A köszönés soha nem
+# nyomhatja el az igazi kérdést.
+_TARSALGAS = [
     (("köszönöm", "köszi", "kösz ", "hálás"), _t_koszonom),
     (("szia", "helló", "hello", "hali", "jó reggelt", "jó estét", "jó napot",
       "üdv", "csá"), _t_udvozles),
     (("mit tudsz", "miben tudsz", "mire vagy", "ki vagy", "mit csinálsz", "segít",
       "miről tudsz", "mit kérdez", "mihez értesz", "mi ez az oldal"), _t_kepessegek),
+]
+
+
+_TEMAK = [
     (("holnapi ár", "holnap ár", "holnapi day", "holnapi dam", "holnap mennyi lesz az ár",
       "holnapi árak"), _t_holnapi_ar),
     (("tölt", "mikor kapcsol", "mikor indít", "mosogép", "mosógép", "olcsó ablak",
@@ -1655,6 +1697,64 @@ def _felutessel(u):
     return ki
 
 
+# Egyertelmuen TEMAN KIVULI kerdesek. Ezek a modellt EL SEM ERIK: azonnal
+# udvarias elharitas megy ki. Ketto haszna van. Egyreszt szakmai: egy
+# energiapiaci iranyitopult asszisztense ne adjon recepteket. Masreszt
+# gyakorlati: a napi keret nem fogy el olyan kerdesekre, amelyekre amugy sem
+# valaszolnank.
+_TEMAN_KIVUL = (
+    "recept", "főz", "foz", "süt", "sut", "vacsora", "ebéd", "étel", "koktél",
+    "vicc", "mesélj", "vers", "novella", "sztori", "dalszöveg", "horoszkóp",
+    "fordítsd", "forditsd", "translate", "kód", "programozz", "python",
+    "focimeccs", "meccs", "sport", "film", "sorozat", "zene", "játék",
+    "politika", "választás", "kormány", "miniszter", "háború",
+    "gyógyszer", "betegség", "orvos", "diéta", "fogyó",
+    "randi", "szerelem", "kapcsolat", "hogy vagy", "mit csinálsz ma este",
+)
+
+# A biztonsagi halo: ha a kerdesben SEMMILYEN energiaval kapcsolatos szo nincs,
+# a temán kívüli talalat valoban temán kívülit jelent.
+_ENERGIA_SZAVAK = (
+    "ár", "dam", "mwh", "mw", "€", "eur", "huf", "forint", "tölt", "fogyaszt",
+    "terhel", "csúcs", "napelem", "napenergia", "szolár", "szél", "megújuló",
+    "termel", "hőmérsék", "fok", "időjárás", "modell", "catboost", "mavir",
+    "előrejelz", "pontos", "anomál", "szokatlan", "stl", "energia", "áram",
+    "villany", "piac", "tőzsd", "adat", "flux", "okosmérő", "oldal", "grafikon",
+)
+
+
+def _illeszkedik(k, minta):
+    """Rövid mintát csak SZÓHATÁRON fogadunk el.
+
+    Az "ár" három betűje ott van a "vacsorára", a "határ" és a "január" szóban
+    is — puszta részszöveg-kereséssel a "receptet vacsorára" energiakérdésnek
+    minősült volna. Négy karakternél rövidebb mintánál ezért szó eleji egyezést
+    követelünk meg; a hosszabbak (magyar toldalékolás miatt) maradnak
+    részszövegnek."""
+    if len(minta) >= 4:
+        return minta in k
+    return re.search(r"(?<!\w)" + re.escape(minta), k) is not None
+
+
+def _teman_kivul(kerdes):
+    k = str(kerdes).lower()
+    if not any(_illeszkedik(k, m) for m in _TEMAN_KIVUL):
+        return False
+    # Ha energiával kapcsolatos szó is van benne, inkább válaszolunk:
+    # a "mennyibe kerül az áram főzéshez?" jogos kérdés.
+    return not any(_illeszkedik(k, m) for m in _ENERGIA_SZAVAK)
+
+
+def _elharitas(f):
+    kep = _t_kepessegek(f)
+    sor = ("Elnézést, ebben nem tudok segíteni — én kizárólag az OkosMérő élő "
+           "adataival és a magyar energiahelyzettel foglalkozom. Erre a kérdésre "
+           "egy általános nyelvi asszisztens jobb választás. ")
+    sor += (kep["sor"] if kep else
+            "Amint megérkeznek az élő adatok, szívesen mesélek az energiapiacról.")
+    return _u(sor, None, "amiről kérdezhetsz")
+
+
 def _sajat_valasz(kerdes, f):
     """Determinisztikus válasz a kérdés témájára, kizárólag az élő adatokból.
 
@@ -1664,20 +1764,41 @@ def _sajat_valasz(kerdes, f):
     k = str(kerdes).lower().strip()
     if not k:
         return None
-    for minta, kezelo in _TEMAK:
-        if not any(m in k for m in minta):
-            continue
-        try:
-            v = kezelo(f)
-        except Exception as e:
-            print(f"[FLUX] Téma ({kezelo.__name__}): {e}", flush=True)
-            v = None
-        if v:
-            return _felutessel(v)
+
+    def _fut(lista):
+        talalatok = []
+        for minta, kezelo in lista:
+            if not any(m in k for m in minta):
+                continue
+            try:
+                v = kezelo(f)
+            except Exception as e:
+                print(f"[FLUX] Téma ({kezelo.__name__}): {e}", flush=True)
+                v = None
+            if v:
+                talalatok.append(v)
+        return talalatok
+
+    # 1) ÉRDEMI témák. Egy kérdésben több dolog is szerepelhet ("mennyi az ár
+    # és mennyi a napenergia?") — ilyenkor mindkettőre válaszolunk, nem csak
+    # az elsőre. Kettőnél többet nem fűzünk össze, mert olvashatatlan lenne.
+    talalt = _fut(_TEMAK)
+    if talalt:
+        if len(talalt) == 1:
+            return _felutessel(talalt[0])
+        egyesitett = dict(talalt[0])
+        egyesitett["sor"] = " ".join(t["sor"] for t in talalt[:2])
+        return _felutessel(egyesitett)
+
+    # 2) Csak ha SEMMILYEN érdemi téma nem talált, jön a köszönés vagy a
+    # képességek felsorolása. Így a "Szia, mennyi az ár?" az árra válaszol.
+    tars = _fut(_TARSALGAS)
+    if tars:
+        return tars[0]
     return None
 
 
-def valasz(kerdes, data, ajanlas=None, kontextus=None):
+def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
     """A látogató kérdésére adott egyetlen válasz.
 
     Sorrend: (1) determinisztikus válasz a témára, (2) Gemini, ha átmegy az
@@ -1691,9 +1812,17 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
                   "a nap- és széltermelésről, az időjárásról vagy a modell pontosságáról "
                   "is tudok beszélni.", None, "amiről kérdezhetsz")
 
-    # 0) Ugyanarra a kérdésre, ugyanabban az adatállapotban ne hívjuk újra a
+    # 0/a) Témán kívüli kérdés: a modellt el sem érjük, így keretet sem fogyaszt.
+    if _teman_kivul(kerdes):
+        print(f"[FLUX] Témán kívüli kérdés: {str(kerdes)[:80]!r}", flush=True)
+        return _elharitas(f)
+
+    # 0/b) Ugyanarra a kérdésre, ugyanabban az adatállapotban ne hívjuk újra a
     # modellt. Több látogató jellemzően ugyanazt kérdezi, és a kvóta közös.
-    valasz_kulcs = f"{_hash(f)}:{' '.join(str(kerdes).lower().split())[:120]}"
+    # A köszönés-jelző is a kulcs része: különben az első látogatónak készült,
+    # köszönéssel kezdődő válasz menne ki annak is, aki már régóta itt van.
+    valasz_kulcs = (f"{_hash(f)}:{int(bool(mar_koszont))}:"
+                    f"{' '.join(str(kerdes).lower().split())[:120]}")
     tarolt = None
     with _MEMO_LOCK:
         rec = _VALASZ_MEMO.get(valasz_kulcs)
@@ -1730,8 +1859,13 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
                f"Ha a kérdés visszautal rá ('ez', 'erről', 'miért'), erre "
                f"vonatkozik.\n\n" if kontextus else "")
             + f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
-            "Válaszolj EGY elemmel a megadott formában. A 'sor' a beszélgető "
-            "válasz (2-3 mondat), a 'szam' egyetlen kiemelt érték mértékegységgel "
+            + ("A látogató MÁR JÁRT itt ebben a munkamenetben, tehát NE köszönj "
+               "újra, hanem rögtön a lényeggel kezdj.\n"
+               if mar_koszont else
+               "Ez a látogató ELSŐ kérdése ebben a munkamenetben — egy rövid "
+               "köszönés belefér.\n")
+            + "Válaszolj EGY elemmel a megadott formában. A 'sor' a beszélgető "
+            "válasz (2-4 mondat), a 'szam' egyetlen kiemelt érték mértékegységgel "
             "az adatokból, a 'cimke' 2-5 szóban megmondja, mi az a szám. "
             "Használhatod a 'megujulok', 'fogyasztas', 'tegnapi_osszevetes', 'dam', "
             "'toltes', 'kartyak', 'idojaras', 'modell_pontossag', 'heti_merleg', "

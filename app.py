@@ -1874,7 +1874,8 @@ def flux_kerdes(kontextus, kerdes, data):
     try:
         aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
         v = flux.valasz(kerdes, data, aj,
-                        kontextus=(kontextus or {}).get("sor"))
+                        kontextus=(kontextus or {}).get("sor"),
+                        mar_koszont=bool((kontextus or {}).get("mar_koszont")))
     except Exception as e:
         print(f"[FLUX] Kérdés callback: {e}", flush=True)
         v = {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
@@ -1913,7 +1914,13 @@ app.clientside_callback(
         // Az ÉPPEN OLVASOTT megállapítás elmegy a kérdéssel: enélkül az
         // "és ez mit jelent?" kérdésre Flux nem tudta, mire vonatkozik a "ez".
         var sor = (window.fluxAktualis ? window.fluxAktualis() : "");
-        return {sor: sor, n: n_submit};
+        // Köszönt-e már ebben a böngésző-munkamenetben? Enélkül a nyelvi
+        // modell MINDEN válaszot "Szia!"-val kezdett, ami pár kérdés után
+        // modorossá vált. Az első kérdés után ez a jelző igazra vált, és a
+        // szerver ennek megfelelően utasítja a modellt.
+        var mar = !!window.FLUX_MAR_KOSZONT;
+        window.FLUX_MAR_KOSZONT = true;
+        return {sor: sor, mar_koszont: mar, n: n_submit};
     }
     """,
     Output("flux-kerdes-kontextus","data"),
@@ -2545,18 +2552,51 @@ def _megujulo_panel(meg, dtok, cim):
             html.Span(ertek, style={"fontSize":"10px","color":szin,"fontWeight":"500"})
         ], style={"display":"flex","justifyContent":"space-between","padding":"4px 2px"})
 
-    # Az összeg CSAK a hátralévő, még be nem következett órákra. A teljes sáv
-    # két félbevágott nappalt fog át — annak az összege semmivel nem vethető össze.
-    jovo = slice(mert_ig+1, M)
+    # Az összeg CSAK a hátralévő, még be nem következett órákra — ÉS CSAK A MAI
+    # NAPRA.
+    #
+    # Itt volt a hiba: `M` az egész sorozat hossza, ami 14:00 után átnyúlik a
+    # HOLNAPI napra (a célablak addig tart). Az összeg így a mai maradékot és a
+    # holnapi teljes nappalt is tartalmazta, vagyis nagyjából másfél napot —
+    # 35 752 MWh jött ki napelemre, holott egy magyar nyári nap teljes termelése
+    # 20-25 ezer MWh. A felirat közben "a hátralévő órákra" volt, ami a mai
+    # napot ígéri.
+    ma_datum = _helyi_most().date()
+    ma_utolso = max((i for i, d in enumerate(mdtok) if d.date() == ma_datum),
+                    default=M - 1)
+    holnap_idx = [i for i, d in enumerate(mdtok) if d.date() > ma_datum]
+
+    jovo = slice(mert_ig + 1, ma_utolso + 1)
+    jovo_orak = max(0, ma_utolso - mert_ig)
+
+    if jovo_orak > 0:
+        ossz_cimke = f"Várható termelés a mai hátralévő {jovo_orak} órára (MWh)"
+    elif holnap_idx:
+        # A mai nap lezárult. Nulla helyett a holnapi tervet mutatjuk — de
+        # egyértelműen holnapiként megnevezve, nem "hátralévőként".
+        jovo = slice(holnap_idx[0], holnap_idx[-1] + 1)
+        ossz_cimke = "Várható termelés holnapra (MWh)"
+    else:
+        ossz_cimke = "Várható termelés a hátralévő órákra (MWh)"
+
     jn = float(np.sum(f_nap[jovo])); jsz = float(np.sum(f_szel[jovo]))
-    jovo_orak = max(0, M - mert_ig - 1)
 
     def _sav_txt(ossz, kulcs):
+        # Este a napelemes összeg jogosan nulla, de a "0 – 0" úgy néz ki, mintha
+        # elromlott volna valami. Kimondjuk az okát.
+        if ossz < 1:
+            return "≈ 0 · lement a nap" if kulcs == "nap" else "≈ 0"
         lo, hi = FC_SAV[kulcs]
         return f"{ossz*(1+lo):,.0f} – {ossz*(1+hi):,.0f}".replace(","," ")
 
-    nap_cs = int(np.argmax(f_nap[jovo])) + mert_ig + 1 if jovo_orak else int(np.argmax(f_nap))
-    szel_cs = int(np.argmax(f_szel[jovo])) + mert_ig + 1 if jovo_orak else int(np.argmax(f_szel))
+    # A jósolt csúcs ugyanabból az ablakból, mint az összeg — különben a
+    # kártya két sora két különböző időszakról beszélne.
+    _kezd = jovo.start or 0
+    if (jovo.stop or 0) > _kezd:
+        nap_cs = int(np.argmax(f_nap[jovo])) + _kezd
+        szel_cs = int(np.argmax(f_szel[jovo])) + _kezd
+    else:
+        nap_cs = int(np.argmax(f_nap)); szel_cs = int(np.argmax(f_szel))
 
     osszesito = html.Div([
         html.Div("A JÓSLAT PONTOSSÁGA MA", style={"fontSize":"11px","fontWeight":"500",
@@ -2569,7 +2609,7 @@ def _megujulo_panel(meg, dtok, cim):
         _sor("Nap", f"{cimke(mdtok[nap_cs])} · {f_nap[nap_cs]:,.0f} MW".replace(","," "), NAP, "☀"),
         _sor("Szél", f"{cimke(mdtok[szel_cs])} · {f_szel[szel_cs]:,.0f} MW".replace(","," "), SZEL, "◇"),
         html.Div(style={"borderTop":f"1px solid {C['brd']}","marginTop":"6px","marginBottom":"6px"}),
-        html.Div("Várható termelés a hátralévő órákra (MWh)",
+        html.Div(ossz_cimke,
             style={"fontSize":"9px","color":C['mut'],"marginBottom":"3px"}),
         _sor("Nap", _sav_txt(jn, "nap"), NAP, "☀"),
         _sor("Szél", _sav_txt(jsz, "szel"), SZEL, "◇"),
@@ -2601,6 +2641,15 @@ KAT_NEV = {k: n for k, n, _, _ in KAT_META}
 KAT_KEP = {k: kp for k, _, _, kp in KAT_META}
 
 
+def _ts_naiv(iso):
+    """A napló ISO időbélyege → időzóna nélküli datetime, vagy None."""
+    try:
+        t = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    return t.replace(tzinfo=None) if t.tzinfo else t
+
+
 def _reziduum_panel(stl, naplo):
     """Az STL reziduuma az utolsó 7 napon, ±2,5σ küszöbbel. A küszöböt
     átlépő órák a kategóriájuk színét kapják — így a grafikon és a napló
@@ -2614,7 +2663,14 @@ def _reziduum_panel(stl, naplo):
     idok = idok[-n7:]; resid = resid[-n7:]
     stat = stl["stat"]; kuszob = float(stat["kuszob"]); atlag = float(stat["mean"])
 
-    kat_map = {r["ido"]: r.get("kategoria") for r in (naplo or [])}
+    # A naplóban szereplő órák — időbélyeg szerint. A napló a FELISMERÉS
+    # pillanatában mért reziduumot is tárolja; ez a hiteles érték, mert az
+    # akkori küszöbhöz mérve lépte át a határt.
+    naplo_map = {}
+    for r in (naplo or []):
+        t_ = _ts_naiv(r.get("ido"))
+        if t_ is not None:
+            naplo_map[t_] = r
 
     fig = go.Figure()
     fig.add_hline(y=atlag + kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
@@ -2628,19 +2684,48 @@ def _reziduum_panel(stl, naplo):
         hovertemplate="%{x|%m.%d. %H:%M}<br>%{y:+,.0f} MWh<extra>reziduum</extra>",
         showlegend=False))
 
+    # A pontok a NAPLÓBÓL jönnek, nem újraszámolt küszöbpróbából.
+    #
+    # Korábban a grafikon maga döntötte el, mi számít anomáliának: minden
+    # betöltéskor újrafuttatta az `|reziduum - átlag| > küszöb` próbát a FRISSEN
+    # számolt STL-en. Csakhogy az STL gördülő felbontás — ahogy új órák
+    # érkeznek, a trend és a napi ritmus újraillesztődik, és ugyanannak az
+    # órának megváltozik a maradéka. Emiatt a naplóban szereplő, egyszer már
+    # felismert órák a grafikonról eltűntek (velük a jelmagyarázat is), és a
+    # két nézet ellentmondott egymásnak — pedig a panel alcíme épp azt ígéri,
+    # hogy ugyanazt a nyelvet beszélik.
+    #
+    # Mostantól a napló a hiteles forrás: azokat az órákat jelöljük, amelyeket
+    # a rendszer annak idején — az AKKORI küszöbhöz mérve — anomáliának ismert
+    # fel, és a felismeréskor mért reziduummal rajzoljuk ki őket.
+    # A pont a MOSTANI görbén ül, a napló csak azt mondja meg, MELYIK órát
+    # jelöljük és milyen kategóriával. Ha a felismeréskor mért reziduumot
+    # raknánk ki, a pont messze lebegne a vonaltól (a naplóban -730 áll, a mai
+    # görbén ugyanott +200), ami zavaró lenne. A felismeréskori értéket ezért
+    # a buborékban mutatjuk meg — ott van a helye.
+    resid_map = dict(zip(idok, resid))
     csoportok = {}
-    for t, v_ in zip(idok, resid):
-        if abs(v_ - atlag) > kuszob:
-            kat = kat_map.get(t.isoformat())
-            csoportok.setdefault(kat, {"x": [], "y": []})
-            csoportok[kat]["x"].append(t); csoportok[kat]["y"].append(v_)
+    for t_, r in naplo_map.items():
+        if t_ not in resid_map:
+            continue                      # kívül esik a mutatott 7 napon
+        kat = r.get("kategoria")
+        cs = csoportok.setdefault(kat, {"x": [], "y": [], "sug": []})
+        cs["x"].append(t_)
+        cs["y"].append(resid_map[t_])
+        try:
+            cs["sug"].append(f"{float(r.get('residual')):+,.0f} MWh".replace(",", " "))
+        except (TypeError, ValueError):
+            cs["sug"].append("—")
     for kat, pontok in csoportok.items():
         szin = KAT_SZIN.get(kat, "#94a3b8")
         nev = KAT_NEV.get(kat, "besorolás előtti")
         fig.add_trace(go.Scatter(x=pontok["x"], y=pontok["y"], mode="markers",
             name=nev, marker=dict(size=8, color=szin,
                 line=dict(width=1, color="rgba(255,255,255,.6)")),
-            hovertemplate="%{x|%m.%d. %H:%M}<br>%{y:+,.0f} MWh<extra>" + nev + "</extra>"))
+            customdata=pontok["sug"],
+            hovertemplate="%{x|%m.%d. %H:%M}<br>most: %{y:+,.0f} MWh"
+                          "<br>felismeréskor: %{customdata}"
+                          "<extra>" + nev + "</extra>"))
 
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         font=dict(color=C['mut'], family='Inter,sans-serif', size=10),
