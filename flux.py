@@ -798,7 +798,19 @@ def _tegnap_mondat(f):
     if atl is not None and abs(atl) >= 1:
         sor += (f" A mai nap eddigi átlaga {abs(atl):.0f} százalékkal "
                 f"{'magasabb' if atl > 0 else 'alacsonyabb'}, mint tegnap ugyaneddig.")
-    return {"sor": sor, "szam": f"{sz:+.0f}%", "cimke": "eltérés a tegnapi azonos órától"}
+    # A kiemelt szám és a mondat NEM mondhat mást. 0,76%-nál a mondat azt írja,
+    # hogy "gyakorlatilag ugyanannyi", a `+.0f` viszont +1%-ra kerekített —
+    # a kártyán így egymásnak ellentmondó két állítás állt. Egy százalék alatt
+    # ezért tizedesjeggyel írjuk ki (magyar tizedesvesszővel).
+    if abs(sz) < 0.05:
+        szam = "0%"                       # gyakorlatilag azonos: ne "+0,0%" álljon ott
+    elif abs(sz) < 1:
+        szam = f"{sz:+.1f}%".replace(".", ",")
+    else:
+        szam = f"{sz:+.0f}%"
+    # A címke rövid: a hosszabb változat ("eltérés a tegnapi azonos órától")
+    # nem fér ki a kártyára, és a végén levágódott.
+    return {"sor": sor, "szam": szam, "cimke": "eltérés tegnaphoz"}
 
 
 def _ho_mondat(ho, f):
