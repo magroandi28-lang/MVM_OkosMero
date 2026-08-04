@@ -1729,23 +1729,27 @@ def render(data,oldal):
 
     src=html.Div([src_sor(k,not v) for k,v in fb.items()])
 
-    # A felirat VISZONYÍTÓ, nem minősítő — ugyanúgy, ahogy Flux is fogalmaz.
-    # Az "Olcsó" abszolút állítás volt: 106 €/MWh-nál félrevezető, mert az
-    # önmagában nem olcsó ár. Az "Átlag alatt" viszont tény, és a látogató
-    # rögtön tudja, mihez képest. A küszöb így egybeesik a felirattal: ami
-    # a mai átlag alatt van, arra azt írjuk, hogy átlag alatt. A szűk ±5%-os
-    # sáv az "átlag körül", hogy a hajszálnyi eltérés ne billegtesse a szöveget.
-    # (Az átlag itt a MAI day-ahead árak napi átlaga.)
+    # A besorolás a nap SAJÁT NEGYEDEIHEZ mér, nem az átlaghoz.
+    #
+    # Az átlaghoz mérés azért nem működött, mert a napi árgörbe erősen jobbra
+    # ferde: néhány drága esti óra (ma 405 €/MWh) felhúzza az átlagot, így a
+    # 24 órából 15-18 "átlag alatt" van. A felirat igaz volt, de egész nap
+    # ugyanazt mutatta, tehát nem mondott semmit.
+    #
+    # A kvartilisek ezt megoldják: a nap legolcsóbb negyede "Olcsó", a
+    # legdrágább negyede "Drága", a köztes fele "Átlagos". Ez a ferdeségtől
+    # függetlenül mindig megkülönböztet, és visszahozza az eredeti szavakat.
     if dam_most < 0:
         kat = "Negatív ár"
-    elif not ma_atlag:
-        kat = "Aktuális ár"
-    elif dam_most < ma_atlag * 0.95:
-        kat = "Átlag alatt"
-    elif dam_most > ma_atlag * 1.05:
-        kat = "Átlag felett"
+    elif len(dam_ma) >= 8:
+        also = float(np.percentile(dam_ma, 25))
+        felso = float(np.percentile(dam_ma, 75))
+        kat = ("Olcsó" if dam_most <= also else
+               ("Drága" if dam_most >= felso else "Átlagos"))
+    elif ma_atlag:
+        kat = "Olcsó" if dam_most < ma_atlag else "Drága"
     else:
-        kat = "Átlag körül"
+        kat = "Aktuális ár"
 
     # A modell jóslata AZ AKTUÁLIS ÓRÁRA. Nem eredm[0]-t veszünk: a célablak
     # első sora rendszerint a most futó óra, de az ENTSO-E mérési késése
@@ -2698,33 +2702,38 @@ def _reziduum_panel(stl, naplo):
     # Mostantól a napló a hiteles forrás: azokat az órákat jelöljük, amelyeket
     # a rendszer annak idején — az AKKORI küszöbhöz mérve — anomáliának ismert
     # fel, és a felismeréskor mért reziduummal rajzoljuk ki őket.
-    # A pont a MOSTANI görbén ül, a napló csak azt mondja meg, MELYIK órát
-    # jelöljük és milyen kategóriával. Ha a felismeréskor mért reziduumot
-    # raknánk ki, a pont messze lebegne a vonaltól (a naplóban -730 áll, a mai
-    # görbén ugyanott +200), ami zavaró lenne. A felismeréskori értéket ezért
-    # a buborékban mutatjuk meg — ott van a helye.
-    resid_map = dict(zip(idok, resid))
+    # A pont a FELISMERÉSKOR mért reziduumon ül — ezt az értéket NEM számoljuk
+    # újra.
+    #
+    # Az STL gördülő felbontás: minden oldalbetöltéskor újrailleszti a trendet
+    # és a napi ritmust a legutóbbi ~408 órára. Egy óra maradéka ettől
+    # megváltozik — ami tegnap este -730 MWh volt, ma ugyanarra az órára +300.
+    # Emiatt a korábban felismert anomáliák előbb eltűntek a grafikonról, majd
+    # amikor a mai görbére tettem őket, a küszöbön BELÜLRE kerültek, holott az
+    # alcím azt ígéri, hogy átlépik. Mindkettő félrevezető volt.
+    #
+    # Ami egy adott napon anomália volt, az anomália is marad: a napló őrzi az
+    # akkor mért értéket, és a grafikon ezt mutatja. Így a hét kiugrásai
+    # együtt, változatlanul látszanak.
     csoportok = {}
+    ablak_kezd, ablak_veg = idok[0], idok[-1]
     for t_, r in naplo_map.items():
-        if t_ not in resid_map:
+        if not (ablak_kezd <= t_ <= ablak_veg):
             continue                      # kívül esik a mutatott 7 napon
-        kat = r.get("kategoria")
-        cs = csoportok.setdefault(kat, {"x": [], "y": [], "sug": []})
-        cs["x"].append(t_)
-        cs["y"].append(resid_map[t_])
         try:
-            cs["sug"].append(f"{float(r.get('residual')):+,.0f} MWh".replace(",", " "))
+            y_ = float(r.get("residual"))
         except (TypeError, ValueError):
-            cs["sug"].append("—")
+            continue
+        kat = r.get("kategoria")
+        cs = csoportok.setdefault(kat, {"x": [], "y": []})
+        cs["x"].append(t_); cs["y"].append(y_)
     for kat, pontok in csoportok.items():
         szin = KAT_SZIN.get(kat, "#94a3b8")
         nev = KAT_NEV.get(kat, "besorolás előtti")
         fig.add_trace(go.Scatter(x=pontok["x"], y=pontok["y"], mode="markers",
             name=nev, marker=dict(size=8, color=szin,
                 line=dict(width=1, color="rgba(255,255,255,.6)")),
-            customdata=pontok["sug"],
-            hovertemplate="%{x|%m.%d. %H:%M}<br>most: %{y:+,.0f} MWh"
-                          "<br>felismeréskor: %{customdata}"
+            hovertemplate="%{x|%m.%d. %H:%M}<br>%{y:+,.0f} MWh"
                           "<extra>" + nev + "</extra>"))
 
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
@@ -2741,7 +2750,8 @@ def _reziduum_panel(stl, naplo):
         html.Div("REZIDUUM ÉS ANOMÁLIÁK — UTOLSÓ 7 NAP",
             style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
         html.Div("Mért fogyasztás mínusz trend és napi ritmus · a színes pontok a "
-                 "±2,5σ küszöböt átlépő, osztályozott órák",
+                 "±2,5σ küszöböt átlépő, osztályozott órák a felismerés napján "
+                 "mért értékükkel",
             style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 8px"}),
         dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height":"320px"})
     ], style=CS)
