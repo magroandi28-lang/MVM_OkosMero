@@ -1729,9 +1729,23 @@ def render(data,oldal):
 
     src=html.Div([src_sor(k,not v) for k,v in fb.items()])
 
-    kat = ("Negatív" if dam_most<0 else
-           ("Olcsó" if ma_atlag and dam_most<ma_atlag*0.7 else
-            ("Drága" if ma_atlag and dam_most>ma_atlag*1.3 else "Átlagos")))
+    # A felirat VISZONYÍTÓ, nem minősítő — ugyanúgy, ahogy Flux is fogalmaz.
+    # Az "Olcsó" abszolút állítás volt: 106 €/MWh-nál félrevezető, mert az
+    # önmagában nem olcsó ár. Az "Átlag alatt" viszont tény, és a látogató
+    # rögtön tudja, mihez képest. A küszöb így egybeesik a felirattal: ami
+    # a mai átlag alatt van, arra azt írjuk, hogy átlag alatt. A szűk ±5%-os
+    # sáv az "átlag körül", hogy a hajszálnyi eltérés ne billegtesse a szöveget.
+    # (Az átlag itt a MAI day-ahead árak napi átlaga.)
+    if dam_most < 0:
+        kat = "Negatív ár"
+    elif not ma_atlag:
+        kat = "Aktuális ár"
+    elif dam_most < ma_atlag * 0.95:
+        kat = "Átlag alatt"
+    elif dam_most > ma_atlag * 1.05:
+        kat = "Átlag felett"
+    else:
+        kat = "Átlag körül"
 
     # A modell jóslata AZ AKTUÁLIS ÓRÁRA. Nem eredm[0]-t veszünk: a célablak
     # első sora rendszerint a most futó óra, de az ENTSO-E mérési késése

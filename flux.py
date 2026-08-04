@@ -55,7 +55,10 @@ LANGUAGE = "hu-HU"
 TTL_PERC = 35          # a 30 perces adatfrissítéshez igazítva: egy adatállapot
                        # = egy Gemini-hívás, utána tárolt szöveg megy ki
 GEMINI_TIMEOUT = 12         # a főoldali szöveghez (háttérben készül)
-GEMINI_KERDES_TIMEOUT = 8   # a látogató kérdéséhez: ő vár rá, ne kelljen sokat
+GEMINI_KERDES_TIMEOUT = 10  # a látogató kérdéséhez. Ez FELSŐ KORLÁT, nem
+                            # várakozási idő: a modell rendszerint 2-4 mp
+                            # alatt felel. Szorosabb korlátnál egy amúgy jó,
+                            # épp elkészülő választ dobnánk el feleslegesen.
 
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
@@ -87,20 +90,30 @@ def _napszak(m=None):
 
 
 def _udvozles(m=None):
-    """Napszaknak megfelelő köszönés. Ettől látszik, hogy Flux tudja, hány óra van."""
-    return {"hajnal": "Jó éjszakát!", "reggel": "Jó reggelt!",
+    """Napszaknak megfelelő köszönés.
+
+    FIGYELEM: a "Jó éjszakát!" magyarul ELKÖSZÖNÉS, nem üdvözlés. Aki hajnali
+    egykor nyitja meg az oldalt, azt nem elbúcsúztatni kell. Ezért hajnalban
+    a semleges "Szia!" megy ki. A "Jó estét!" viszont este és éjfél körül is
+    helyes üdvözlés."""
+    return {"hajnal": "Szia!", "reggel": "Jó reggelt!",
             "délelőtt": "Szia!", "dél": "Szia!", "délután": "Szia!",
             "este": "Jó estét!", "éjszaka": "Jó estét!"}[_napszak(m)]
 
 
 def elo_koszonto(m=None):
-    """Élő köszöntő: köszönés + napszak. A látogató első mondatból látja,
-    hogy nem egy előre megírt szöveget olvas, hanem valamit, ami tudja,
-    mikor nézi az oldalt."""
+    """Élő köszöntő: napszaknak megfelelő köszönés.
+
+    A pontos óra korábban benne volt a mondatban ("Most 10:47 van"), de
+    látogatóként ez fölösleges: senki nem az energiapiaci irányítópulttól
+    kérdezi meg, hány óra. A napszak szerinti köszönés bőven elég ahhoz,
+    hogy élőnek hasson. Az időt Flux belül továbbra is pontosan ismeri —
+    ez vezérli az igeidőket —, és ha valaki KIFEJEZETTEN rákérdez, meg is
+    mondja."""
     m = m or _most()
     return (f"{_udvozles(m)} Flux vagyok, az OkosMérő energiaasszisztense. "
-            f"Most {m:%H:%M} van; élő energiapiaci és időjárási adatokból mondom el, "
-            f"mi történik éppen a magyar villamosenergia-rendszerben.")
+            f"Élő energiapiaci és időjárási adatokból mondom el, mi történik "
+            f"éppen a magyar villamosenergia-rendszerben.")
 
 FLUX_SZEREP = (
     "Te vagy Flux, az OkosMérő energiapiaci irányítópult asszisztense. "
@@ -1734,9 +1747,11 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
                     "fogalmazok — amint újratöltődik, megint bővebben válaszolok. "
                     "Az adatok viszont ugyanúgy élők: ")
     except GeminiLassuHiba as e:
+        # Az időtúllépés MÚLÉKONY: a következő kérdésnél már rendben lehet.
+        # Ilyenkor nem magyarázkodunk a látogatónak, egyszerűen válaszolunk a
+        # saját, adatból számolt mondattal — az is pontos. A naplóba viszont
+        # bekerül, hogy lássuk, ha sűrűsödik.
         print(f"[FLUX] Kérdés — lassú: {e}", flush=True)
-        elonezet = ("A nyelvi modell most lassan felel, ezért röviden mondom, "
-                    "de az adatok élők: ")
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
 
