@@ -287,9 +287,15 @@ def _anomalia_kategoria(t, residual, w, ido_map):
         return None
     temp = float(w["Homerseklet_C"])
 
-    # 1) Időjárási extrém — a modell saját küszöbeivel összhangban
+    # 1) Időjárási extrém — a modell saját küszöbeivel összhangban.
+    #
+    # AZ IRÁNY IS SZÁMÍT. A hőség a hűtésen, a hideg a fűtésen keresztül
+    # egyaránt TÖBBLETFOGYASZTÁST okoz. Ha tehát 35 fokban KEVESEBB fogyott a
+    # szokásosnál, azt az időjárás nem magyarázza — a régi szabály mégis
+    # "időjárási extrém"-nek bélyegezte, és ezzel hamis okot sugallt.
+    # A "napelem-árnyék" ágban ez a megkötés eddig is benne volt; itt hiányzott.
     if temp >= 30.0 or temp <= -5.0:
-        return "extrem"
+        return "extrem" if residual > 0 else "visszaeses"
 
     # 2) Napelem-árnyék — nappali túlfogyasztás gyenge sugárzásnál:
     # a sugárzás nem éri el a környező napok AZONOS ÓRÁI maximumának 45%-át
@@ -462,11 +468,16 @@ C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a
      'txt':'#cbd5e1','mut':'#64748b','or':'#FF6600','gr':'#10b981','bl':'#0066CC',
      'rd':'#ef4444','yw':'#f59e0b','cy':'#4b9cd3','wh':'#f1f5f9'}
 
+# A `hoverformat` biztonsági háló: ha egy nyomvonal `hovertemplate`-jéből
+# kimaradna a számformátum, a Plotly a nyers lebegőpontos értéket írná ki
+# (pl. 456.78856443562727). A tengelyre állított formátum ezt minden esetben
+# elfogja, mert a sablon nélküli hover-értékek innen öröklik a megjelenítést.
 CHART = dict(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
     font=dict(color=C['txt'],family='Inter,sans-serif',size=10),
     margin=dict(l=40,r=15,t=35,b=35),
     xaxis=dict(gridcolor=C['brd'],showline=False,color=C['mut'],zeroline=False),
-    yaxis=dict(gridcolor=C['brd'],showline=False,color=C['mut'],zeroline=False),
+    yaxis=dict(gridcolor=C['brd'],showline=False,color=C['mut'],zeroline=False,
+               hoverformat=",.0f"),
     showlegend=False)
 
 # ============================================================
@@ -2049,7 +2060,8 @@ def fooldal(data,aj):
             tickformat="%H:%M",dtick=3*60*60*1000,fixedrange=True,
             range=[idok[0],idok[-1]+timedelta(minutes=lepes)]),
         yaxis=dict(gridcolor=C['brd'],color=C['mut'],
-            zeroline=False,fixedrange=True,range=[y_min,y_max]))
+            zeroline=False,fixedrange=True,range=[y_min,y_max],
+            hoverformat=",.0f"))
 
     state_class = "is-negative" if float(aj["akt_ar"]) < 0 else (
         "is-ready" if toltheto else "is-waiting")
@@ -2121,6 +2133,11 @@ FC_MAE = {"nap": 19, "szel": 34}   # órás MAE, az átlagos termelés %-ában
 
 KAT_META = [
     ("extrem", "Időjárási extrém", "#f59e0b", "anomalia-extrem.png"),
+    # A hőség és a hideg egyaránt EMELI a fogyasztást (hűtés, illetve fűtés).
+    # Ha szélsőséges hőmérséklet mellett mégis KEVESEBB fogyott, akkor az
+    # időjárás nem magyarázat — épp az ellenkezőjét várnánk. Ez a kategória
+    # ezt a megfigyelést nevezi meg, okot nem állít.
+    ("visszaeses", "Váratlan visszaesés", "#a78bfa", "anomalia-rejtely.png"),
     ("napelem", "Napelem-árnyék", "#4dd0e1", "anomalia-napelem.png"),
     ("fordulat", "Trendváltás", "#10b981", "anomalia-fordulat.png"),
     ("rejtely", "Vizsgálat alatt", "#FF6600", "anomalia-rejtely.png"),
@@ -2761,7 +2778,7 @@ def _reziduum_panel(stl, naplo):
         xaxis=dict(type="date", gridcolor="#101f35", color=C['mut'],
             tickformat="%m.%d", fixedrange=True),
         yaxis=dict(title="MWh", gridcolor="#101f35", color=C['mut'],
-            zeroline=False, fixedrange=True))
+            zeroline=False, fixedrange=True, hoverformat="+,.0f"))
 
     return html.Div([
         html.Div("REZIDUUM ÉS ANOMÁLIÁK — UTOLSÓ 7 NAP",
