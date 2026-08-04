@@ -35,19 +35,7 @@ except ImportError:
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# A `gemini-2.5-flash` ingyenes kerete NAPI 20 hívás — ezt egy megosztott
-# portfólióoldal néhány látogató alatt kimeríti, és onnantól Flux csak a saját
-# sablonjaiból beszél. A `gemini-2.0-flash` ingyenes kerete nagyságrendekkel
-# nagyobb, ezért ez az alapértelmezés.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-
-# Tartalék modellek. Minden modellnek KÜLÖN kerete van, ezért ha az elsőé
-# betelt, a másodikkal még mindig van élő, nyelvi modell által fogalmazott
-# válasz. A lista a `GEMINI_MODEL`-lel kezdődik, utána a tartalékok jönnek —
-# a duplikátumok kiesnek, hogy ugyanazt ne próbáljuk kétszer.
-_TARTALEK_MODELLEK = ["gemini-2.0-flash", "gemini-2.0-flash-lite",
-                      "gemini-2.5-flash-lite", "gemini-2.5-flash"]
-GEMINI_MODELLEK = list(dict.fromkeys([GEMINI_MODEL] + _TARTALEK_MODELLEK))
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 SCHEMA_VERSION = 2
 PROMPT_VERSION = "flux-v2"
@@ -104,15 +92,11 @@ def elo_koszonto(m=None):
 
 FLUX_SZEREP = (
     "Te vagy Flux, az OkosMérő energiapiaci irányítópult asszisztense. "
-    "Magyarul, tegezve, barátságosan és élő, természetes mondatokban beszélsz — "
-    "úgy, ahogy egy jó szakértő mesél arról, amit épp lát az adatokban. "
-    "Lehetsz érdeklődő és lelkes, ha valami tényleg érdekes; a szakmai "
-    "pontosság ettől még nem sérülhet.\n"
-    "EGYETLEN kemény szabály van, ettől soha nem térhetsz el: kizárólag a "
-    "megkapott JSON adatokra támaszkodhatsz, és számot csak akkor írhatsz le, "
-    "ha az pontosan szerepel az adatokban. Nem becsülsz, nem kerekítesz át, "
-    "nem találsz ki semmit. Ha egy adat hiányzik, arról a témáról nem beszélsz. "
-    "Minden más — a hangnem, a mondatszerkesztés, a hangsúlyok — a te dolgod."
+    "Magyarul, tegezve, barátságosan és tömören beszélsz. "
+    "KIZÁRÓLAG a megkapott JSON adatokra támaszkodhatsz. "
+    "Számot csak akkor írhatsz le, ha az pontosan szerepel az adatokban. "
+    "Nem becsülsz, nem kerekítesz át, nem találsz ki semmit. "
+    "Ha egy adat hiányzik, arról a témáról nem beszélsz."
 )
 
 # A látogató KÉRDÉSÉRE más hangnem kell, mint a főoldali megállapításokhoz.
@@ -541,55 +525,6 @@ _MEMO = {}
 _MEMO_LOCK = threading.Lock()
 _MEMO_MAX = 32
 
-# ---- Kvóta-védelem ----
-# Ha egyszerre többen nyitják meg az oldalt (pl. egy elküldött pályázat után),
-# a Gemini ingyenes kerete percek alatt kimerülhet. Onnantól minden hívás
-# 429-cel jön vissza — de mindegyik VÁRAKOZÁSSAL, tehát a látogató úgy éli
-# meg, hogy Flux lassú és néma. Ezért az első kvóta-hiba után egy ideig
-# meg sem próbáljuk: a determinisztikus válasz azonnal megy ki.
-_KVOTA_LOCK = threading.Lock()
-_KVOTA_TILTAS_PERC = 10
-# Modellenként külön tiltás: ha az egyik kerete betelt, a másiké még élhet.
-_kvota_tiltva_eddig = {}
-
-# A főoldali szöveg legyártása egyszerre csak EGY szálon fusson. Enélkül
-# öt egyidejű látogató öt külön Gemini-hívást indítana ugyanarra az
-# adatállapotra — ötszörös kvótafogyasztás ugyanazért az eredményért.
-_GYARTAS_LOCK = threading.Lock()
-
-# A kérdésekre adott válaszok is gyorsítótárba kerülnek. Több látogató
-# jellemzően ugyanazt kérdezi ("mit tudsz?", "mennyi az ár?"), ezért ez
-# érdemben csökkenti a hívások számát.
-_VALASZ_MEMO = {}
-_VALASZ_MEMO_MAX = 64
-_VALASZ_TTL = 600
-
-
-def _valasz_memo_ir(kulcs, ertek):
-    with _MEMO_LOCK:
-        if len(_VALASZ_MEMO) >= _VALASZ_MEMO_MAX:
-            legregebbi = min(_VALASZ_MEMO, key=lambda k: _VALASZ_MEMO[k]["lejar"])
-            _VALASZ_MEMO.pop(legregebbi, None)
-        _VALASZ_MEMO[kulcs] = {"ertek": ertek, "lejar": time.time() + _VALASZ_TTL}
-
-
-def _kvota_blokkolt(modell):
-    with _KVOTA_LOCK:
-        return time.time() < _kvota_tiltva_eddig.get(modell, 0.0)
-
-
-def _kvota_jelez(modell):
-    """Kvóta-hiba után egy ideig meg sem hívjuk EZT a modellt."""
-    with _KVOTA_LOCK:
-        _kvota_tiltva_eddig[modell] = time.time() + _KVOTA_TILTAS_PERC * 60
-    print(f"[FLUX] {modell}: kerete betelt — {_KVOTA_TILTAS_PERC} percig "
-          f"kihagyom, jöhet a következő modell.", flush=True)
-
-
-def _elerheto_modellek():
-    """Azok a modellek, amelyeknek most nem tiltott a keretük."""
-    return [m for m in GEMINI_MODELLEK if not _kvota_blokkolt(m)]
-
 
 def _memo_olvas(kulcs):
     with _MEMO_LOCK:
@@ -939,84 +874,39 @@ def sablon_uzenetek(f):
 # 5) GEMINI + ELLENŐRZÉS
 # ============================================================
 
-class GeminiKvotaHiba(RuntimeError):
-    """Elfogyott a nyelvi modell kerete (HTTP 429 / RESOURCE_EXHAUSTED).
-
-    Ez nem programhiba, hanem átmeneti állapot: a keret idővel újratöltődik.
-    Ezért külön típus — a látogatónak őszintén megmondjuk, ahelyett hogy
-    Flux csak szűkszavúbbá válna minden magyarázat nélkül."""
-
-
-class GeminiLassuHiba(RuntimeError):
-    """A nyelvi modell nem válaszolt időben."""
-
-
 def _gemini(prompt, sema, timeout=GEMINI_TIMEOUT, szerep=None, homerseklet=0.4):
-    """Végigpróbálja az elérhető modelleket, amíg valamelyik válaszol.
-
-    Minden modellnek KÜLÖN ingyenes kerete van. Ha csak egyet használnánk,
-    annak kimerülésével Flux azonnal elnémulna nyelvileg — pedig a következő
-    modell keretéből még bőven van. Aminek betelt a kerete, azt egy ideig
-    átugorjuk, hálózati hívás nélkül."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY nincs beállítva")
-    elerheto = _elerheto_modellek()
-    if not elerheto:
-        raise GeminiKvotaHiba("minden modell kerete betelt, a hívás kihagyva")
-    utolso_hiba = None
-    for modell in elerheto:
-        try:
-            return _gemini_egy(modell, prompt, sema, timeout, szerep, homerseklet)
-        except GeminiKvotaHiba as e:
-            utolso_hiba = e
-            continue          # jöhet a következő modell, saját kerettel
-    raise utolso_hiba or GeminiKvotaHiba("nincs elérhető modell")
-
-
-def _gemini_egy(modell, prompt, sema, timeout, szerep, homerseklet):
-    """Egyetlen modell meghívása."""
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{modell}:generateContent")
-    try:
-        r = requests.post(
-            url,
-            headers={"x-goog-api-key": GEMINI_API_KEY,
-                     "Content-Type": "application/json"},
-            json={
-                "system_instruction": {"parts": [{"text": szerep or FLUX_SZEREP}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": homerseklet,
-                    "responseMimeType": "application/json",
-                    "responseSchema": sema,
-                },
+           f"{GEMINI_MODEL}:generateContent")
+    r = requests.post(
+        url,
+        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json={
+            "system_instruction": {"parts": [{"text": szerep or FLUX_SZEREP}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": homerseklet,
+                "responseMimeType": "application/json",
+                "responseSchema": sema,
             },
-            timeout=timeout,
-        )
-    except requests.exceptions.Timeout as e:
-        raise GeminiLassuHiba(f"{modell} időtúllépés ({timeout} mp)") from e
+        },
+        timeout=timeout,
+    )
     if r.status_code != 200:
         # A Google a hiba OKÁT a válasz törzsében küldi (rossz kulcs, nem
         # létező modellnév, kimerült kvóta). A puszta `raise_for_status()`
         # ezt eldobta, ezért a naplóban csak egy szám látszott, és nem
         # lehetett megmondani, miért hallgat Flux.
-        torzs = r.text[:400]
-        if r.status_code == 429 or "RESOURCE_EXHAUSTED" in torzs:
-            _kvota_jelez(modell)
-            raise GeminiKvotaHiba(f"{modell} kvóta: {torzs}")
-        if r.status_code == 404:
-            # Nem létező modellnév: ne próbáljuk újra, de a többi még jöhet.
-            _kvota_jelez(modell)
-            raise GeminiKvotaHiba(f"{modell} nem érhető el: {torzs}")
-        raise RuntimeError(f"{modell} HTTP {r.status_code}: {torzs}")
+        raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:400]}")
     valasz_json = r.json()
     jeloltek = valasz_json.get("candidates") or []
     if not jeloltek:
-        raise RuntimeError(f"{modell} üres válasz: {str(valasz_json)[:400]}")
+        raise RuntimeError(f"Gemini üres válasz: {str(valasz_json)[:400]}")
     reszek = jeloltek[0].get("content", {}).get("parts") or []
     szoveg = "".join(p.get("text", "") for p in reszek)
     if not szoveg.strip():
-        raise RuntimeError(f"{modell} nem adott szöveget: {str(jeloltek[0])[:400]}")
+        raise RuntimeError(f"Gemini nem adott szöveget: {str(jeloltek[0])[:400]}")
     return json.loads(szoveg)
 
 
@@ -1150,23 +1040,6 @@ def uzenetek(data, ajanlas=None, koszonto=None):
         except Exception as e:
             print(f"[FLUX] Gyorsítótár olvasás: {e}", flush=True)
 
-    # Egyszerre csak egy szál gyárt. A zár NEM várakozó: ha épp más látogató
-    # hívása fut, ez a látogató azonnal megkapja a determinisztikus szöveget,
-    # ahelyett hogy akár 12 másodpercet várna valaki más Gemini-hívása mögött.
-    # A következő oldalletöltés már a kész, gazdagabb változatot kapja.
-    if not _GYARTAS_LOCK.acquire(blocking=False):
-        return tartalek
-    try:
-        kesz = _memo_olvas(ck)
-        if kesz is not None:
-            return kesz
-        return _gyart(f, ck, fh, minoseg, koszonto, tartalek)
-    finally:
-        _GYARTAS_LOCK.release()
-
-
-def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
-    """A főoldali szöveg tényleges legyártása. Csak a `_GYARTAS_LOCK` alatt fut."""
     allapot, model_nev, hibak = "fallback", "deterministic-template-v1", []
     vegleges = tartalek
 
@@ -1175,10 +1048,10 @@ def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
             "Az alábbi JSON a magyar villamosenergia-rendszer élő adatait tartalmazza.\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
             "Készíts 4-5 megállapítást a főoldalra. Minden megállapítás:\n"
-            "- 'sor': egy vagy két élő, jól olvasható mondat. A számot írd bele a "
-            "mondatba. Ne címszavakat írj, hanem mondatokat, és ne legyél kioktató — "
-            "azt mondd el, mit LÁTSZ az adatokban, és ha valami szokatlan vagy "
-            "érdekes, azt nyugodtan emeld ki,\n"
+            "- 'sor': egy vagy két teljes mondat, tárgyilagos, szakmai hangnemben "
+            "('várhatóan', 'megközelítheti', 'amennyiben megoldható'). A számot írd bele "
+            "a mondatba. Ne használj gondolatjelet, ne írj címszavakat, ne tegezd és ne "
+            "oktasd ki az olvasót,\n"
             "- 'szam': egyetlen kiemelt érték mértékegységgel, pontosan az adatokból,\n"
             "- 'cimke': 2-5 szavas kontextus, ami megmondja, MI az a szám "
             "(pl. 'előrejelzett csúcsterhelés'), soha ne önmagában álló mértékegység.\n"
@@ -1197,8 +1070,8 @@ def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
             "  * 'nap_mai_tetozes_mw' = a MAI, MÁR ELMÚLT tetőzés — múlt idő.\n"
             "  * 'nap_holnapi_csucs_mw' = a HOLNAPI napra szóló terv. Ha ezt említed, "
             "ÍRD KI a mondatba, hogy HOLNAPRÓL van szó.\n"
-            "Az érdekesség a fontos: mi az, ami eltér a megszokottól. Kioktatás és "
-            "üres udvariaskodás nélkül.\n"
+            "Soha ne adj tanácsot a látogatónak és ne oktasd ki: csak azt mondd el, "
+            "mit mutatnak az adatok.\n"
             "A legérdekesebb az ELTÉRÉS: mennyivel több vagy kevesebb a szokásosnál "
             "(fogyasztás a heti átlaghoz, ár a mai átlaghoz, napenergia az eddigi csúcshoz).\n"
             "SZÓHASZNÁLAT: a 'kartyak.budapest_homerseklet_c' a MOST mért érték — "
@@ -1585,34 +1458,6 @@ _TEMAK = [
 ]
 
 
-# Rövid, emberi felütések. Nem díszítés: enélkül minden válasz ugyanazzal a
-# szikár adatmondattal indul, és Flux úgy hat, mint egy kijelzőtábla. A
-# sorrend körbejár, hogy ne ugyanaz jöjjön minden kérdésre.
-_FELUTESEK = [
-    "Nézzük. ",
-    "Épp jókor kérded. ",
-    "Megnéztem az élő adatokat. ",
-    "Erre tudok válaszolni. ",
-    "Máris. ",
-]
-_felutes_szamlalo = {"i": 0}
-
-
-def _felutessel(u):
-    """Emberi felütés a válasz elé. A saját válaszainkra vonatkozik — a
-    Gemini a saját szerepéből amúgy is így fogalmaz."""
-    if not u or not u.get("sor"):
-        return u
-    # A köszönésre és a köszönetre adott válasz már eleve személyes.
-    if u["sor"].startswith(("Jó ", "Szia", "Szívesen", "Most ")):
-        return u
-    i = _felutes_szamlalo["i"] % len(_FELUTESEK)
-    _felutes_szamlalo["i"] += 1
-    ki = dict(u)
-    ki["sor"] = _FELUTESEK[i] + u["sor"]
-    return ki
-
-
 def _sajat_valasz(kerdes, f):
     """Determinisztikus válasz a kérdés témájára, kizárólag az élő adatokból.
 
@@ -1631,7 +1476,7 @@ def _sajat_valasz(kerdes, f):
             print(f"[FLUX] Téma ({kezelo.__name__}): {e}", flush=True)
             v = None
         if v:
-            return _felutessel(v)
+            return v
     return None
 
 
@@ -1649,19 +1494,6 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
                   "a nap- és széltermelésről, az időjárásról vagy a modell pontosságáról "
                   "is tudok beszélni.", None, "amiről kérdezhetsz")
 
-    # 0) Ugyanarra a kérdésre, ugyanabban az adatállapotban ne hívjuk újra a
-    # modellt. Több látogató jellemzően ugyanazt kérdezi, és a kvóta közös.
-    valasz_kulcs = f"{_hash(f)}:{' '.join(str(kerdes).lower().split())[:120]}"
-    tarolt = None
-    with _MEMO_LOCK:
-        rec = _VALASZ_MEMO.get(valasz_kulcs)
-        if rec and rec["lejar"] > time.time():
-            tarolt = rec["ertek"]
-        elif rec:
-            _VALASZ_MEMO.pop(valasz_kulcs, None)
-    if tarolt is not None:
-        return tarolt
-
     # 1) A biztos válasz azonnal kész — erre mindig van mit visszaadni.
     biztos = _sajat_valasz(kerdes, f)
     if biztos is None and kontextus:
@@ -1673,9 +1505,6 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
         print(f"[FLUX] Nem talált témát a kérdésre: {str(kerdes)[:120]!r}", flush=True)
 
     # 2) A Gemini csak akkor kerül a helyére, ha valóban jobb és hiteles.
-    # Ha átmeneti okból (kvóta, lassúság) nem sikerül, ezt a látogató is
-    # megtudja — a válasz elé kerül egy rövid, őszinte mondat.
-    elonezet = ""
     try:
         meta = f.get("_meta") or {}
         prompt = (
@@ -1706,33 +1535,12 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
                     szerep=FLUX_SZEREP_KERDES, homerseklet=0.7)
         jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
         if jo:
-            _valasz_memo_ir(valasz_kulcs, jo[0])
             return jo[0]
         print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
-    except GeminiKvotaHiba as e:
-        # Ez nem hiba, hanem átmeneti állapot — a látogató megérdemli, hogy
-        # megtudja, miért lett Flux hirtelen szűkszavú.
-        print(f"[FLUX] Kérdés — kvóta: {e}", flush=True)
-        elonezet = ("Most épp betelt a nyelvi modell kerete, úgyhogy tömörebben "
-                    "fogalmazok — amint újratöltődik, megint bővebben válaszolok. "
-                    "Az adatok viszont ugyanúgy élők: ")
-    except GeminiLassuHiba as e:
-        print(f"[FLUX] Kérdés — lassú: {e}", flush=True)
-        elonezet = ("A nyelvi modell most lassan felel, ezért röviden mondom, "
-                    "de az adatok élők: ")
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
 
     if biztos:
-        if elonezet:
-            biztos = dict(biztos)
-            # A magyarázó mondat után a saját mondat kisbetűvel folytatódik.
-            sor = biztos["sor"]
-            biztos["sor"] = elonezet + (sor[0].lower() + sor[1:] if sor else sor)
-        else:
-            # Csak a "tiszta" választ tesszük el. A kvóta- vagy lassúság-jelzés
-            # átmeneti állapotot ír le, azt nem szabad 10 percre bebetonozni.
-            _valasz_memo_ir(valasz_kulcs, biztos)
         return biztos
 
     # 3) Nem találtunk témát: ne egy üres "nem tudom" menjen ki, hanem az,
@@ -1756,7 +1564,7 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None):
 print(
     f"[FLUX] Indulás — Gemini kulcs: "
     f"{'BEÁLLÍTVA (' + str(len(GEMINI_API_KEY)) + ' karakter)' if GEMINI_API_KEY else 'HIÁNYZIK'}"
-    f" | modellek: {', '.join(GEMINI_MODELLEK)}"
+    f" | modell: {GEMINI_MODEL}"
     f" | adatbázis: {'igen' if _db_ok() else 'nem'}",
     flush=True,
 )
