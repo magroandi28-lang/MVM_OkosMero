@@ -7,24 +7,22 @@
    egy pillanat alatt visszaíródik ugyanoda, ahol tartott. */
 
 (function () {
-  const FLUX_VERZIO = "2026-08-04-a";
-  const KARAKTER_MS = 95;      // ~10 karakter / másodperc — olvasható tempó
-  const KITARTAS_MIN = 9000;   // rövid megállapítás ennyit marad kint
-  const KITARTAS_MAX = 22000;  // hosszú megállapítás legfeljebb ennyit
+  const FLUX_VERZIO = "2026-08-04-b";
+  const KARAKTER_MS = 35;      // ~29 karakter / másodperc — gyorsan kiírja
+  const KITARTAS_MIN = 6000;   // rövid megállapítás ennyit marad kint
+  const KITARTAS_MAX = 10000;  // hosszú megállapítás legfeljebb ennyit
 
   const VARAKOZO_SOR = "Egy pillanat, megnézem az élő adatokat…";
 
   /* Mennyi ideig maradjon kint a kész mondat.
 
-     A korábbi 1,8-3,5 másodperc arra épült, hogy a látogató a gépelés KÖZBEN
-     már olvas. Ez tévedés: a szemünk nem tud a megjelenő karakterekkel egy
-     ütemben haladni, ráadásul a mondat vége — ahol a szám van — csak a
-     legvégén kerül ki. Így a lényeget alig két másodpercre lehetett látni,
-     megjegyezni pedig végképp nem. Egy 200 karakteres mondat elolvasása
-     nyugodt tempóban 8-10 másodperc, ezért a kitartás mostantól a mondat
-     hosszához igazodik, és jóval bőkezűbb. */
+     Nem a GÉPELÉSNEK kell lassúnak lennie — azt nézni idegőrlő —, hanem a
+     kész mondatnak kell sokáig kint maradnia. Ezért a gépelés gyors, a
+     kitartás viszont a mondat hosszához igazodik: rövidnél 6, hosszúnál
+     10 másodperc. Egy 180 karakteres megállapítás így 6 másodperc alatt
+     kiíródik, majd további 9 másodpercig olvasható. */
   function kitartas(sor) {
-    const ms = 5000 + sor.length * 60;
+    const ms = 3000 + sor.length * 35;
     return Math.min(KITARTAS_MAX, Math.max(KITARTAS_MIN, ms));
   }
 
