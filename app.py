@@ -2676,6 +2676,24 @@ def _reziduum_panel(stl, naplo):
         if t_ is not None:
             naplo_map[t_] = r
 
+    # A VONAL is a felismeréskori értéket veszi át azokban az órákban, amelyek
+    # a naplóban szerepelnek.
+    #
+    # Enélkül a grafikonon két különböző sorozat keveredett: a kék vonal a MAI
+    # újraszámolás, a pontok a TÁROLT érték — így a pontok a levegőben lógtak,
+    # jóval a vonal fölött. Egy sorozatot mutatunk: ahol a rendszer annak idején
+    # rögzítette a maradékot, ott az a hiteles érték; a többi órán a mostani
+    # számítás adja a kontextust. Így a kiugrások a vonalon is látszanak, a
+    # pontok rajta ülnek, és mind átlépi a küszöböt.
+    for i, t_ in enumerate(idok):
+        r = naplo_map.get(t_)
+        if not r:
+            continue
+        try:
+            resid[i] = float(r["residual"])
+        except (TypeError, ValueError, KeyError):
+            pass
+
     fig = go.Figure()
     fig.add_hline(y=atlag + kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
     fig.add_hline(y=atlag - kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
@@ -2715,18 +2733,17 @@ def _reziduum_panel(stl, naplo):
     # Ami egy adott napon anomália volt, az anomália is marad: a napló őrzi az
     # akkor mért értéket, és a grafikon ezt mutatja. Így a hét kiugrásai
     # együtt, változatlanul látszanak.
+    # A pontok ugyanabból a sorozatból jönnek, amit a vonal is rajzol — így
+    # nem tudnak elcsúszni egymástól.
+    resid_map = dict(zip(idok, resid))
     csoportok = {}
-    ablak_kezd, ablak_veg = idok[0], idok[-1]
-    for t_, r in naplo_map.items():
-        if not (ablak_kezd <= t_ <= ablak_veg):
-            continue                      # kívül esik a mutatott 7 napon
-        try:
-            y_ = float(r.get("residual"))
-        except (TypeError, ValueError):
+    for t_ in idok:
+        r = naplo_map.get(t_)
+        if not r:
             continue
         kat = r.get("kategoria")
         cs = csoportok.setdefault(kat, {"x": [], "y": []})
-        cs["x"].append(t_); cs["y"].append(y_)
+        cs["x"].append(t_); cs["y"].append(resid_map[t_])
     for kat, pontok in csoportok.items():
         szin = KAT_SZIN.get(kat, "#94a3b8")
         nev = KAT_NEV.get(kat, "besorolás előtti")
