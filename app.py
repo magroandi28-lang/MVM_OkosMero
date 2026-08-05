@@ -1529,15 +1529,9 @@ def fetch(n,_manual):
             # A felirat a TÉNYLEGES hosszt mutassa, ne egy remélt 30 napot.
             s = load.tail(720) if len(load)>=720 else load
             stl_napok = max(1, round(len(s)/24))
-            res = STL(s, period=24, seasonal=25, robust=True).fit()
-            mean = float(res.resid.median())
-            abs_deviations = abs(res.resid - mean)
-            mad = float(abs_deviations.median())
-            std_equivalent = mad * 1.4826
-            kuszob = 2.5 * std_equivalent
-            mask = abs(res.resid - mean) > kuszob
-            
-       
+            res = STL(s,period=24,seasonal=25,robust=True).fit()
+            std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
+            mask=abs(res.resid-mean)>kuszob
             # A négy idősor 0,1 MWh-ra kerekítve megy a böngészőbe. Teljes
             # lebegőpontos alakban négyszer ~700 érték a `dcc.Store` JSON
             # méretének a nagy részét adta, miközben a grafikonokon egy MWh
@@ -2851,7 +2845,7 @@ def _anomalia_naplo_panel(naplo):
                      "megszokott sávban mozog.",
                 style={"fontSize":"11px","color":C['gr']})], style=CS)
     sorok = []
-    for r in naplo[:25]:
+    for r in naplo[:9]:
         dt = datetime.fromisoformat(r["ido"])
         kat = r.get("kategoria")
         szin = KAT_SZIN.get(kat, "#94a3b8")
@@ -2927,7 +2921,7 @@ def _stl_ador_nagy(naplo, kategoriak):
         html.Div(lab, style={"fontSize":"10px","color":C['mut'],
             "borderTop":f"1px solid {C['brd']}","paddingTop":"9px",
             "marginTop":"12px"}),
-    ], style=tyle={**CS, "maxHeight": "380px", "overflowY": "auto"})
+    ], style=CS)
 
 
 def _ar_megujulo_panel(meg, negyed):
