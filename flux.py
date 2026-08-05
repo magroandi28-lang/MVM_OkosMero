@@ -864,18 +864,29 @@ def _ho_mondat(ho, f):
 
 
 def _szel_mondat(mg):
-    """A széltermelés mondata — a napelemessel azonos igeidő-logikával:
-    ha a napi csúcs órája még hátravan, jelen időben; ha elmúlt, múlt időben."""
+    """A széltermelés mondata — azzal kezdve, ami MÉG ELŐTTÜNK VAN.
+
+    A korábbi változat mindig a napi csúccsal indított. Éjfél után ez
+    értelmetlenné vált: hajnali negyed egykor azt írta, hogy "a mai termelés
+    00:00 körül tetőzött" — a nap tizenöt perce tartott, a mondat mégis úgy
+    hangzott, mintha az egész nap lezajlott volna. A hasznos információ az,
+    hogy a hátralévő órákban mi várható; a napi csúcs ehhez csak háttér."""
     if not mg or mg.get("szel_mai_csucs_mw") is None:
         return None
+
+    hatra = mg.get("szel_hatralevo_csucs_mw")
+    if hatra is not None:
+        cs = _ezres(hatra)
+        sor = (f"A szélerőművek termelése a mai nap hátralévő részében "
+               f"{cs} MW-ig emelkedhet a napelőtti terv szerint.")
+        if mg.get("szel_mai_atlag_mw") is not None:
+            sor += f" A napi átlag {_ezres(mg['szel_mai_atlag_mw'])} MW."
+        return {"sor": sor, "szam": f"{cs} MW", "cimke": "hátralévő széltermelési csúcs"}
+
+    # A mai nap lezárult: ilyenkor a napi csúcs a mondanivaló, múlt időben.
     cs = _ezres(mg["szel_mai_csucs_mw"])
-    ido = _ido(mg.get("szel_mai_csucs_ido"))
-    if mg.get("szel_csucs_meg_hatravan"):
-        sor = (f"A szélerőművek mai termelése a napelőtti terv szerint {ido} körül "
-               f"tetőzik, {cs} MW-tal.")
-    else:
-        sor = (f"A szélerőművek mai termelése a napelőtti terv szerint {ido} körül "
-               f"tetőzött, {cs} MW-tal.")
+    sor = (f"A szélerőművek mai termelése {_ido(mg.get('szel_mai_csucs_ido'))} körül "
+           f"tetőzött, {cs} MW-tal.")
     if mg.get("szel_mai_atlag_mw") is not None:
         sor += f" A napi átlag {_ezres(mg['szel_mai_atlag_mw'])} MW."
     return {"sor": sor, "szam": f"{cs} MW", "cimke": "mai széltermelési csúcs"}
@@ -1851,7 +1862,13 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
         meta = f.get("_meta") or {}
         prompt = (
             f"Most {meta.get('helyi_ido')} van Budapesten, tehát "
-            f"{meta.get('napszak')} van. Ehhez igazítsd a hangnemet és az igeidőket.\n\n"
+            f"{meta.get('napszak')} van. Ehhez igazítsd a hangnemet és az igeidőket.\n"
+            # A napszak megnevezése nem elég: a modell a "hajnal" szóból
+            # hajnali negyed egykor is "Jó reggelt!"-re következtetett. Ezért
+            # a KÖSZÖNÉST magát adjuk meg, és megtiltjuk a sajátot.
+            f"Ha köszönsz, KIZÁRÓLAG ezt használd: \"{_udvozles()}\". "
+            f"Más köszönést NE írj — hajnalban a \"Jó reggelt\" és a "
+            f"\"Jó napot\" egyaránt hibás.\n\n"
             "Élő adatok:\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
             + (f"A látogató ÉPPEN EZT a megállapítást olvasta a képernyőn, "

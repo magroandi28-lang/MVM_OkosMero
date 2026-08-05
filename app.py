@@ -735,7 +735,12 @@ def get_dam():
         return None,False
     try:
         c = _entsoe(); ma = _ma()
-        s = pd.Timestamp((ma-timedelta(days=2)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
+        # 30 nap visszamenőleg: ebből számoljuk, mi számít OLCSÓNAK és DRÁGÁNAK.
+        # Rövidebb ablakkal ez nem dönthető el szakszerűen: ha az egész hét
+        # drága, a napon belüli — vagy akár háromnapos — összehasonlítás a
+        # kiugró árat is "átlagosnak" mutatja. A modell bemenetei ettől nem
+        # változnak, csak a besorolás kap valódi hátteret.
+        s = pd.Timestamp((ma-timedelta(days=30)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
         e = pd.Timestamp((ma+timedelta(days=2)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
         arak = c.query_day_ahead_prices("HU",start=s,end=e)
         if isinstance(arak,pd.DataFrame): arak = arak.iloc[:,0]
@@ -757,7 +762,19 @@ def get_dam():
         ma_oras = [oras.get(ma_ts + pd.Timedelta(hours=h)) for h in range(24)]
         ma_oras = [v for v in ma_oras if v is not None]
 
+        # A besorolási sáv: az elmúlt 30 nap MÁR LEZAJLOTT óráinak eloszlása.
+        # Csak három szám megy a böngészőbe, nem 720 érték.
+        mult = [v for t, v in oras.items() if t <= pd.Timestamp(_helyi_most()).floor('h')]
+        sav = None
+        if len(mult) >= 168:                      # legalább egy hét kell hozzá
+            sav = {"p25": float(np.percentile(mult, 25)),
+                   "p50": float(np.percentile(mult, 50)),
+                   "p75": float(np.percentile(mult, 75)),
+                   "orak": len(mult),
+                   "napok": round(len(mult) / 24)}
+
         return {"oras":{t.isoformat(): v for t,v in oras.items()},
+                "sav": sav,
                 "negyed":{"ido":[t.isoformat() for t in elore.index],
                           "ar":[float(x) for x in elore.values]},
                 "ma_oras": ma_oras,
@@ -1606,6 +1623,9 @@ def fetch(n,_manual):
         "eur_huf":eur_huf if eur_ok else None,
         "negyed":dam["negyed"],
         "dam_ma_oras":dam["ma_oras"],
+        # A besorolás viszonyítási sávja: az elmúlt 30 nap lezajlott óráinak
+        # negyedelő értékei. Három szám, nem 720.
+        "dam_sav":dam.get("sav"),
         "holnapi_ar":dam["holnapi_ar"],
         "ido_forras":ido_forras if ido_ok else None,
         "aho":aho if ho_ok else None,
@@ -1750,14 +1770,21 @@ def render(data,oldal):
     # A kvartilisek ezt megoldják: a nap legolcsóbb negyede "Olcsó", a
     # legdrágább negyede "Drága", a köztes fele "Átlagos". Ez a ferdeségtől
     # függetlenül mindig megkülönböztet, és visszahozza az eredeti szavakat.
+    # A besorolás alapja az ELMÚLT 30 NAP árainak eloszlása.
+    #
+    # Rövidebb ablakkal ez nem dönthető el szakszerűen. A napon belüli
+    # összehasonlítás egy végig drága napon a kiugró árat is "átlagosnak"
+    # mutatja, a háromnapos ablak pedig egy drága héten csinálja ugyanezt.
+    # Harminc nap már tartalmaz olcsó és drága napokat is, így a "drága" szó
+    # valódi tartalmat kap: az elmúlt hónap legdrágább negyedébe esik.
+    sav = data.get("dam_sav") or {}
     if dam_most < 0:
         kat = "Negatív ár"
-    elif len(dam_ma) >= 8:
-        also = float(np.percentile(dam_ma, 25))
-        felso = float(np.percentile(dam_ma, 75))
-        kat = ("Olcsó" if dam_most <= also else
-               ("Drága" if dam_most >= felso else "Átlagos"))
+    elif sav.get("p25") is not None:
+        kat = ("Olcsó" if dam_most <= sav["p25"] else
+               ("Drága" if dam_most >= sav["p75"] else "Átlagos"))
     elif ma_atlag:
+        # Tartalék, amíg nincs elég előzmény (pl. első indulás után).
         kat = "Olcsó" if dam_most < ma_atlag else "Drága"
     else:
         kat = "Aktuális ár"
@@ -2140,7 +2167,11 @@ KAT_META = [
     ("visszaeses", "Váratlan visszaesés", "#a78bfa", "anomalia-rejtely.png"),
     ("napelem", "Napelem-árnyék", "#4dd0e1", "anomalia-napelem.png"),
     ("fordulat", "Trendváltás", "#10b981", "anomalia-fordulat.png"),
-    ("rejtely", "Vizsgálat alatt", "#FF6600", "anomalia-rejtely.png"),
+    # A korábbi #FF6600 túl közel volt az "Időjárási extrém" #f59e0b színéhez
+    # (a különbség R11 G56 B11), sötét háttéren gyakorlatilag azonosnak
+    # látszottak. Emiatt a "Vizsgálat alatt" pontokat könnyű volt tévesen
+    # időjárási extrémnek olvasni a grafikonon.
+    ("rejtely", "Vizsgálat alatt", "#f472b6", "anomalia-rejtely.png"),
 ]
 HETNAP = ["hétfő","kedd","szerda","csütörtök","péntek","szombat","vasárnap"]
 MAVIR_KEK = "#4da3ff"
@@ -2718,9 +2749,19 @@ def _reziduum_panel(stl, naplo):
         yanchor="bottom", xanchor="left", font=dict(size=9, color=C['rd']))
     fig.add_annotation(x=idok[0], y=atlag - kuszob, text="−2,5σ", showarrow=False,
         yanchor="top", xanchor="left", font=dict(size=9, color=C['rd']))
+    # A buborék szövegét PYTHONBAN állítjuk elő, és a sablon csak kiírja.
+    #
+    # A `%{y:+,.0f}` formátum elvileg helyes, a gyakorlatban mégis nyers
+    # lebegőpontos érték jelent meg (-479.500305202605). A böngészőoldali
+    # számformázásra nem érdemes hagyatkozni, ha egy `f-string` ugyanezt
+    # biztosan megoldja: itt már nincs mit félreértelmezni.
+    def _mwh(v):
+        return f"{v:+,.0f} MWh".replace(",", " ")
+
     fig.add_trace(go.Scatter(x=idok, y=resid, mode="lines",
         line=dict(color="#4b9cd3", width=1.5),
-        hovertemplate="%{x|%m.%d. %H:%M}<br>%{y:+,.0f} MWh<extra>reziduum</extra>",
+        customdata=[_mwh(v) for v in resid],
+        hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}<extra>reziduum</extra>",
         showlegend=False))
 
     # A pontok a NAPLÓBÓL jönnek, nem újraszámolt küszöbpróbából.
@@ -2759,15 +2800,17 @@ def _reziduum_panel(stl, naplo):
         if not r:
             continue
         kat = r.get("kategoria")
-        cs = csoportok.setdefault(kat, {"x": [], "y": []})
+        cs = csoportok.setdefault(kat, {"x": [], "y": [], "txt": []})
         cs["x"].append(t_); cs["y"].append(resid_map[t_])
+        cs["txt"].append(_mwh(resid_map[t_]))
     for kat, pontok in csoportok.items():
         szin = KAT_SZIN.get(kat, "#94a3b8")
         nev = KAT_NEV.get(kat, "besorolás előtti")
         fig.add_trace(go.Scatter(x=pontok["x"], y=pontok["y"], mode="markers",
             name=nev, marker=dict(size=8, color=szin,
                 line=dict(width=1, color="rgba(255,255,255,.6)")),
-            hovertemplate="%{x|%m.%d. %H:%M}<br>%{y:+,.0f} MWh"
+            customdata=pontok["txt"],
+            hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}"
                           "<extra>" + nev + "</extra>"))
 
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
