@@ -363,7 +363,7 @@ Az OkosMérő működő, nyilvánosan elérhető rendszer, amely jelenleg:
 
 
 
-  | Terület | Alkalmazott technológia & Szemlélet | Vállalati megfelelője (Enterprise equivalent) |
+| Terület | Alkalmazott technológia & Szemlélet | Vállalati megfelelője (Enterprise equivalent) |
 | :--- | :--- | :--- |
 | **AI Agent & Orchesztráció** | Karrier Ügynökök (CrewAI Multi-Agent) + Flux Asszisztens | **Azure AI Foundry** / **Azure OpenAI Service** / Copilot Studio |
 | **Operatív Adatbázis & Log** | Supabase PostgreSQL (`forecast_pending`, `forecast_log`, `stl_anomalia`) | Azure Database for PostgreSQL / Fabric |
