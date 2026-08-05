@@ -87,6 +87,22 @@ KOSZONTO = (
 )
 
 
+# ============================================================
+# A KÉSZÍTŐ
+#
+# Ezt Flux akkor mondja el, ha valaki rákérdez ("ki készítette?",
+# "kapcsolat", "ki áll mögötte"). SZÁNDÉKOSAN nem szerepel a körbejáró
+# szövegben: egy szakmai irányítópulton az önreklám elvenné a helyet az
+# élő adatoktól, ráadásul a nyíltan kiírt e-mail-címet a spamgyűjtő
+# robotok begyűjtik. Kérdésre viszont a látogató — jellemzően az, akit
+# tényleg érdekel — azonnal megkapja.
+# ============================================================
+KESZITO_NEV = "Varga Andrea"
+KESZITO_TITULUS = "mesterséges intelligencia alkalmazásai szakember"
+KESZITO_EMAIL = "varga.andrea.job@gmail.com"
+KESZITO_GITHUB = "github.com/magroandi28-lang"
+
+
 def _napszak(m=None):
     """Melyik napszakban vagyunk — budapesti falióra szerint."""
     h = (m or _most()).hour
@@ -163,6 +179,11 @@ FLUX_SZEREP_KERDES = (
     "ingadoznak az árak, mit jelent a megújulók terjedése a rendszerirányításnak, "
     "miért nehéz előre jelezni a fogyasztást. Ez szakmai kontextus, nem adat — "
     "csak arra ügyelj, hogy KONKRÉT SZÁMOT továbbra is kizárólag a JSON-ból írhatsz.\n"
+    "A KÉSZÍTŐ: az OkosMérőt és téged " + KESZITO_NEV + " készített, " +
+    KESZITO_TITULUS + " (kapcsolat: " + KESZITO_EMAIL + ", forráskód: " +
+    KESZITO_GITHUB + "). Ha a látogató a készítőről, a kapcsolatról vagy a "
+    "portfólióról kérdez, EZEKET az adatokat mondd — mást ne találj ki róla, "
+    "és magadtól ne hozd szóba.\n"
     "TÉMAHATÁR: kizárólag az OkosMérő szolgáltatásairól és a magyar "
     "energiahelyzetről beszélhetsz. Ha a látogató másról kérdez (recept, vicc, "
     "politika, fordítás, bármi hétköznapi), udvariasan mondd meg, hogy ebben nem "
@@ -1348,6 +1369,23 @@ def _u(sor, szam=None, cimke=None):
 
 # Témák: (kulcsszavak, kezelő függvény neve). A sorrend számít — az első
 # egyező téma nyer, ezért a specifikusabb kulcsszavak állnak elöl.
+def _t_keszito(f):
+    """"Ki készített?" — a látogató a megalkotóról kérdez."""
+    # A megfogalmazás szakmailag pontos: a CatBoost kész gradient boosting
+    # könyvtár, nem ennek a projektnek a fejlesztése. Amit a készítő végzett:
+    # adatelőkészítés, jellemzőkialakítás, felügyelt tanítás és validálás,
+    # majd az éles rendszer megépítése. Ezt egy interjún számon is kérik.
+    return _u(
+        f"Az OkosMérőt és engem {KESZITO_NEV} készített, {KESZITO_TITULUS}. "
+        f"Az ő munkája a 100 549 órás mestertábla összeállítása, a jellemzők "
+        f"kialakítása, a CatBoost gradient boosting modell felügyelt tanítása "
+        f"és validálása, az élő adatpipeline, a folyamatos visszamérés és az "
+        f"STL-alapú anomáliavizsgálat — és ez az értelmezési réteg is, amelyik "
+        f"most beszél hozzád. "
+        f"Kapcsolat: {KESZITO_EMAIL} · forráskód: {KESZITO_GITHUB}",
+        None, "az OkosMérő készítője")
+
+
 def _t_udvozles(f):
     """Ha a látogató köszön vagy megszólít, Flux visszaköszön — napszak
     szerint —, és rögtön felajánl valamit, amiről kérdezhet."""
@@ -1643,6 +1681,10 @@ def _t_frissites(f):
 # mert a köszönés hamarabb illeszkedett, mint az ár. A köszönés soha nem
 # nyomhatja el az igazi kérdést.
 _TARSALGAS = [
+    (("ki készít", "ki csinál", "ki írta", "ki fejleszt", "ki áll mögött",
+      "kié ez", "megalkot", "alkotó", "szerző", "fejlesztő", "kapcsolat",
+      "elérhetőség", "e-mail", "email", "ki készül", "kinek a munkája",
+      "portfólió", "portfolio", "github"), _t_keszito),
     (("köszönöm", "köszi", "kösz ", "hálás"), _t_koszonom),
     (("szia", "helló", "hello", "hali", "jó reggelt", "jó estét", "jó napot",
       "üdv", "csá"), _t_udvozles),
