@@ -360,3 +360,15 @@ Az OkosMérő működő, nyilvánosan elérhető rendszer, amely jelenleg:
 - STL-alapú anomáliákat azonosít és naplóz
 - folyamatosan visszaméri saját előrejelzéseit a tényleges fogyasztáshoz
 - Flux asszisztenssel közérthetően összefoglalja az aktuális eredményeket
+
+
+
+  | Terület | Alkalmazott technológia & Szemlélet | Vállalati megfelelője (Enterprise equivalent) |
+| :--- | :--- | :--- |
+| **AI Agent & Orchesztráció** | Karrier Ügynökök (CrewAI Multi-Agent) + Flux Asszisztens | **Azure AI Foundry** / **Azure OpenAI Service** / Copilot Studio |
+| **Operatív Adatbázis & Log** | Supabase PostgreSQL (`forecast_pending`, `forecast_log`, `stl_anomalia`) | Azure Database for PostgreSQL / Fabric |
+| **Adatpipeline & Aggregáció** | Python (`pandas`, `NumPy`), ENTSO-E, Open-Meteo REST API-k | Azure Data Factory / ETL Pipelines |
+| **Idősoros Predikció** | CatBoost V10 (100k+ rekordos mestertáblán, direkt többhorizontos jóslás) | Azure Machine Learning / Databricks |
+| **Anomáliadetektálás** | Gördülő STL dekompozíció + kontextusalapú kategorizálás | Azure AI Anomaly Detector |
+| **AI Asszisztens (RAG)** | Flux (Gemini API + Context Injection + LLM Guardrails) | Azure OpenAI Studio / RAG Architecture |
+| **Hibatűrés & Költségoptimalizálás** | Gyorsítótár, API-kvóta védelmi megszakító és determinisztikus tartalék-ág | Enterprise Resilience & Graceful Degradation |
