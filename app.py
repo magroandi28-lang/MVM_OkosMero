@@ -1530,27 +1530,7 @@ def fetch(n,_manual):
             s = load.tail(720) if len(load)>=720 else load
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
-
-            # ROBUSZTUS küszöb: mediánon alapuló szórásbecslés (MAD).
-            #
-            # A küszöb korábban 2,5 × sima szórás volt. Ez önmagát rontó
-            # számítás: a kiugró órák — pontosan azok, amiket detektálni
-            # akarunk — BELESZÁMÍTANAK a szórásba, tehát maguk emelik meg a
-            # küszöböt. Egy szélsőséges nap után a következő napok
-            # érzéketlenebbé válnak, és a hatás annyi ideig tart, ameddig a
-            # vizsgált ablak. Mérhető volt: 08.03 után a küszöb 467-489-ről
-            # 510-re ugrott, és két teljes napra elnémult a napló.
-            #
-            # Belső ellentmondás is volt: az STL-t `robust=True`-val futtatjuk,
-            # tehát a felbontás szándékosan ellenáll a kiugró értékeknek — a
-            # küszöb viszont nem. A MAD (medián abszolút eltérés) ugyanazt a
-            # szerepet tölti be, de a kiugró értékek nem húzzák el. Az 1,4826
-            # szorzó normális eloszlás esetén a szórással teszi egyenértékűvé.
-            _resid = res.resid
-            mean = float(np.median(_resid))
-            _mad = float(np.median(np.abs(_resid - mean)))
-            std = float(1.4826 * _mad) if _mad > 0 else float(_resid.std())
-            kuszob = 2.5 * std
+            std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
             mask=abs(res.resid-mean)>kuszob
             # A négy idősor 0,1 MWh-ra kerekítve megy a böngészőbe. Teljes
             # lebegőpontos alakban négyszer ~700 érték a `dcc.Store` JSON
