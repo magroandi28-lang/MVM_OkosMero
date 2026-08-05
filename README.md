@@ -21,6 +21,7 @@ A projekt nem egyszeri modellkísérlet, hanem teljes adat- és alkalmazási fol
 - Supabase PostgreSQL-alapú előrejelzési és anomálianapló
 - Többforrású adatlekérés, gyorsítótárazás és tartalék adatforrások
 - **Flux** intelligens asszisztens az élő eredmények természetes nyelvű értelmezéséhez
+- Nyelvi modell nélkül is működő, determinisztikus szövegképzés és számhitelesítés
 
 ---
 
@@ -165,12 +166,107 @@ Az offline értékelést folyamatos éles visszamérés egészíti ki. Az operat
 
 Az OkosMérő robusztus STL-dekompozícióval bontja fel a fogyasztási idősort **trendre**, **napi szezonális mintázatra** és **reziduumra**. A ±2,5 szórásos küszöbön kívül eső reziduumokat anomáliaként kezeli, és a rendelkezésre álló időjárási és energiapiaci környezet alapján kategorizálja:
 
-- időjárási extrém
+- időjárási extrém (szélsőséges hőmérséklet mellett mért **többlet**)
+- váratlan visszaesés (szélsőséges hőmérséklet mellett mért **hiány**)
 - alacsony napsugárzáshoz kapcsolódó nappali eltérés
 - jelentős, 24 órán belüli hőmérsékleti fordulat
 - további vizsgálatot igénylő eltérés
 
 Az anomáliák a felületen és a Supabase-adatbázisban egyaránt megjelennek.
+
+**A felismerés pillanata a mérvadó.** Az STL gördülő felbontás: minden frissítéskor újrailleszti a trendet és a napi ritmust a legutóbbi órákra, amitől egy adott óra reziduuma megváltozik. Egy este −730 MWh-nál felismert eltérés a másnapi újraszámoláson már a küszöb alatt lehet, mert a bővülő adat körbeveszi az órát, és a trend elnyeli az eltérés egy részét.
+
+Ezért a reziduum-grafikon **nem számolja újra** a küszöbpróbát: azokat az órákat jelöli, amelyeket a rendszer annak idején — az akkori küszöbhöz mérve — anomáliaként rögzített, a felismeréskor mért értékükkel. Így a grafikon és az anomálianapló mindig ugyanazt mutatja, és a hét kiugrásai együtt, változatlanul látszanak.
+
+### Amikor a detektor önmagát vakítja el
+
+Az STL gördülő ablakon dolgozik: a „normálisat" a legutóbbi napokból tanulja.
+Ebből következik egy visszacsatolás, amelyet érdemes néven nevezni.
+
+A reziduum a mért fogyasztás és a felbontott összetevők különbsége:
+
+```
+reziduum = mért fogyasztás − (trend + napi ritmus)
+```
+
+Az anomália küszöbe eredetileg a reziduumok **szórásának** 2,5-szerese volt.
+Csakhogy a szórásba a kiugró órák is beleszámítanak — pontosan azok, amelyeket
+detektálni akarunk. Minél nagyobb egy kilengés, annál nehezebb legközelebb
+kilengésnek minősülni.
+
+Ez élesben mérhető volt. 2026. augusztus 3-án kilenc szélsőséges óra került a
+naplóba; utána a küszöb 467–489 MWh-ról **510 MWh-ra ugrott**, és a napló két
+teljes napra elnémult — miközben a hőség és a fogyasztási mintázat változása
+tartott tovább.
+
+A javítás medián abszolút eltérésen (MAD) alapuló szórásbecslés, 1,4826-os
+szorzóval. A kiugró értékek ezt nem húzzák el: ugyanazon az adaton a küszöb 527
+helyett 448 MWh. Belső ellentmondást is feloldott — az STL-t `robust=True`
+beállítással futtatjuk, tehát a felbontás szándékosan ellenáll a kiugró
+értékeknek; a küszöb viszont nem volt robusztus.
+
+**A mélyebb korlát ettől még megmarad.** A MAD az egyik csatornát zárja be, de
+a másik nyitva van: ha egy szélsőséges állapot **tartósan** fennáll, a gördülő
+ablak előbb-utóbb beépíti a trendbe és a napi ritmusba. Ekkor a rendszer nem
+azért hallgat, mert hibás, hanem mert az új állapotot már megtanulta
+normálisnak. Egy tartós hőhullám, egy fogyasztáscsökkentési felhívás vagy egy
+klimatikus rendszerváltozás így néhány hét alatt „eltűnik" a jelzésekből.
+
+Ez nem programhiba, hanem az adaptív módszerek természete, és minden gördülő
+referenciára igaz — ugyanez indokolta, hogy a day-ahead árak besorolása 30 napos
+eloszláshoz mérjen, ne a mai naphoz: egy végig drága napon a napon belüli
+összehasonlítás a kiugró árat is átlagosnak mutatja.
+
+A kezelés nem a küszöb finomhangolása, hanem a kérdés kettéválasztása:
+
+| Kérdés | Mihez mérünk |
+|---|---|
+| Szokatlan-e ez az óra a mostani állapothoz képest? | gördülő ablak (jelenlegi megoldás) |
+| Megváltozott-e maga az állapot? | rögzített referencia-időszak |
+
+A második kérdésre a rendszer jelenleg nem válaszol. Ennek megválaszolása
+rezsimváltás-detektálást igényelne — a historikus mestertábla adatot ad hozzá,
+de a mostani működés szándékosan nem állítja, hogy erre képes.
+
+---
+
+### Az irány is számít — egy éles eset tanulsága
+
+2026. augusztus 3-án, egy 37 °C-os csúcsú napon a rendszer kilenc órát jelzett. A mintázat önmagában is beszédes:
+
+| óra | tényleges | szokásos | eltérés | hőmérséklet |
+|---|---:|---:|---:|---:|
+| 08:00 | 4 935 | 4 327 | **+608** | 26,3 °C |
+| 10:00 | 4 869 | 4 329 | **+540** | 30,8 °C |
+| 14:00 | 5 181 | 4 612 | **+569** | 36,9 °C |
+| 18:00 | 6 154 | 6 679 | **−524** | 34,1 °C |
+| 19:00 | 6 173 | 6 778 | **−622** | 34,6 °C |
+| 20:00 | 5 968 | 6 672 | **−730** | 32,8 °C |
+| 21:00 | 5 872 | 6 472 | **−661** | 32,1 °C |
+
+Reggel és délben többlet, este viszont négy egymást követő órán át hiány. A fogyasztás **előrébb csúszott a napon belül**: a hűtési igény már reggel jelentkezett, a megszokott esti csúcs viszont elmaradt. A 19:00-s óra így is a nap maximuma volt — csak 622 MWh-val gyengébb, mint amit a napi ritmus indokolt volna.
+
+**A besorolás azonban hibás okot adott.** Az eredeti szabály kizárólag a hőmérsékletet vizsgálta:
+
+```python
+if temp >= 30.0 or temp <= -5.0:
+    return "extrem"
+```
+
+Ezért az esti négy óra is „időjárási extrém" címkét kapott — holott a hőség a hűtésen keresztül **többletfogyasztást** okoz, nem hiányt. A rendszer az egybeesést látta, és okként tüntette fel.
+
+A javítás az eltérés irányát is figyelembe veszi:
+
+```python
+if temp >= 30.0 or temp <= -5.0:
+    return "extrem" if residual > 0 else "visszaeses"
+```
+
+Így jött létre a **„Váratlan visszaesés"** kategória: szélsőséges hőmérséklet mellett mérhető *csökkenés*. A név a megfigyelést írja le, okot nem állít — mert a rendszer nem is ismeri az okot. Ugyanez a megkötés a „napelem-árnyék" ágban kezdettől benne volt; az „extrém" ágból hiányzott.
+
+**A tanulság módszertani.** Az anomáliadetektálás két különböző feladatot fog össze: az *észlelést* és a *magyarázatot*. Az észlelés statisztikai kérdés, és jól automatizálható. A magyarázat oksági kérdés, amit egy hőmérsékleti küszöb nem dönt el. A kategóriák ezért **kontextuscímkék, nem bizonyított okok**: azt írják le, milyen körülmények között történt az eltérés.
+
+A rendszer ebben az esetben helyesen ismerte fel a négy egymást követő esti órát — egy összefüggő, egyirányú visszaesést, ami nem véletlenszerű zaj. Csak arra nem volt jogosult, hogy okot nevezzen meg hozzá. Egy anomáliadetektortól a megbízható „nem tudom" többet ér, mint a magabiztos téves magyarázat.
 
 ---
 
@@ -178,15 +274,91 @@ Az anomáliák a felületen és a Supabase-adatbázisban egyaránt megjelennek.
 
 Flux az OkosMérő főoldalán működő értelmezési réteg: a rendszer technikai eredményeit közérthető, természetes nyelvű összefoglalókká alakítja, és válaszol az alkalmazás adataival kapcsolatos kérdésekre.
 
+### Két különálló szöveggenerálási ág
+
+Flux szándékosan **két külön úton** dolgozik, mert a főoldal és a kérdés-válasz más igényt támaszt:
+
+| | Főoldali összefoglalók | Látogatói kérdések |
+|---|---|---|
+| Forrás | determinisztikus szövegképzés | Gemini nyelvi modell |
+| Adat | ugyanaz az élő adatcsomag | ugyanaz az élő adatcsomag |
+| Cél | kiszámítható, mindig elérhető | beszélgető, a kérdésre szabott |
+
+A főoldali mondatokat **programozott szabályok** állítják elő az élő adatokból. Nem előre megírt szövegek: a számokat minden megjelenítéskor az aktuális adatcsomag adja, és a mondat szerkezete is a helyzethez igazodik. Így a napi API-keret teljes egésze a látogatói kérdésekre marad, ahol a nyelvi modell valódi értéket ad. A `FLUX_FOOLDAL_GEMINI=1` környezeti változóval a főoldal is átkapcsolható a nyelvi modellre.
+
+### Hogyan készül a determinisztikus szöveg
+
+A főoldali mondatok nem eltárolt szövegek, hanem **mondatvázak**, amelyekbe a Python az élő adatcsomag értékeit illeszti be. A váz állandó, a szám és az igeidő az adattól függ.
+
+```python
+def _nap_mondat(mg):
+    """A napelemes termelés mondata — a napszakhoz igazítva."""
+
+    if mg.get("nap_termeles_mara_lezarult"):
+        cs = _ezres(mg["nap_mai_tetozes_mw"])
+        ido = _ido(mg["nap_mai_tetozes_ido"])
+        return {"sor": f"A mai napelemes termelés lecsengett; "
+                       f"a tetőzés {ido} körül {cs} MW volt.",
+                "szam": f"{cs} MW", "cimke": "mai napenergia-tetőzés"}
+
+    if mg.get("nap_csucs_meg_hatravan"):
+        cs = _ezres(mg["nap_mai_csucs_mw"])
+        ido = _ido(mg["nap_mai_csucs_ido"])
+        return {"sor": f"A napelemes termelés a mai napelőtti terv szerint "
+                       f"{ido} körül tetőzik, {cs} MW-tal.",
+                "szam": f"{cs} MW", "cimke": "mai napenergia-csúcs"}
+    ...
+```
+
+A `{cs}` és a `{ido}` helyére a `tenyek()` függvény által kiszámított élő érték kerül, az **ágválasztást** pedig ugyanez az adat vezérli: a `nap_csucs_meg_hatravan` logikai mező dönti el, hogy a mondat jelen vagy múlt időben áll.
+
+Ugyanaz a váz, három különböző adatállapotban:
+
+| Időpont | Ugyanaz a függvény ezt adja |
+|---|---|
+| 08:00 | „A napelemes termelés a mai napelőtti terv szerint **13:00 körül tetőzik, 2 400 MW-tal**." |
+| 12:00 | „A napelemes termelés a mai napelőtti terv szerint **13:00 körül tetőzik, 3 150 MW-tal**." |
+| 20:00 | „A mai napelemes termelés **lecsengett**; a tetőzés 13:00 körül **2 900 MW volt**." |
+
+Ez a réteg adja Flux **állandó hangját**: a megfogalmazás nem változik véletlenszerűen, a szám és az igeidő viszont mindig az aktuális valóságot tükrözi. A nyelvi modell ugyanezt az adatcsomagot kapja meg, csak szabadabban fogalmaz belőle — ezért marad a két ág hangja egységes akkor is, ha a modell éppen nem elérhető.
+
+A számformázás is közös szabályt követ: ezres tagolás nem törhető szóközzel (`4 695 MWh`), az időpont elé „holnap" kerül, ha nem a mai napra esik, és egy százalék alatti eltérés tizedesjeggyel jelenik meg, hogy ne mondjon mást, mint a mondat.
+
+### Napszak- és időtudatosság
+
+Minden időpont **Europe/Budapest falióra szerint** értelmeződik, a kiszolgáló saját időzónájától függetlenül. Ez nem formai kérdés: ettől függ, hogy egy megállapítás jelen vagy múlt időben hangzik el.
+
+| Helyzet | Megfogalmazás |
+|---|---|
+| a napi csúcs még hátravan | „a mai terv szerint 13:00 körül tetőzik, 2 400 MW-tal" |
+| a csúcs elmúlt, de van még termelés | „a tetőzés 13:00 körül 2 400 MW volt; a hátralévő órákban 686 MW a maximum" |
+| a termelés lecsengett | „a mai napelemes termelés lecsengett… holnapra a terv 3 100 MW" |
+
+A napelőtti előrejelzés sorozata 14:00 után átnyúlik a következő napra. Flux minden órát a **saját dátuma szerint** sorol be, így a holnapi adat sosem jelenhet meg mai értékként.
+
 ### Élő adatokon alapuló válaszadás
 
-Flux nem előre eltárolt válaszokból dolgozik. A kérdés pillanatában a Gemini **strukturált adatcsomagban** kapja meg az OkosMérő aktuális eredményeit — mért és előrejelzett fogyasztás, day-ahead árak, töltési ajánlás, nap- és szélerőművi adatok, anomáliavizsgálat, adatforrások állapota.
+A kérdés pillanatában a Gemini **strukturált adatcsomagban** kapja meg az OkosMérő aktuális eredményeit — mért és előrejelzett fogyasztás, day-ahead árak, töltési ajánlás, nap- és szélerőművi adatok, tegnapi összevetés, modellpontosság, anomáliavizsgálat, adatforrások állapota.
 
 **A nyelvi modell kizárólag az átadott adatcsomag alapján készíthet választ.**
 
-### Gyorsítótárazás
+A válasz emellett ismeri a **képernyőn éppen olvasott megállapítást**, ezért a visszautaló kérdés („és ez mit jelent?") is értelmezhető. Egy kérdésben több téma is szerepelhet — Flux mindegyikre válaszol, nem csak az elsőre.
 
-Minden adatállapot egyedi azonosítót kap. Ha ugyanahhoz az adatállapothoz már készült érvényes összefoglaló, a rendszer azt használja fel új Gemini-hívás helyett. Ennek eredménye alacsonyabb API-költség, gyorsabb válaszidő és azonos adatokhoz következetes válasz.
+### Szakmai témahatár
+
+Flux kizárólag az OkosMérő szolgáltatásairól és a magyar energiahelyzetről beszél. A témán kívüli kérdés **el sem jut a nyelvi modellig**: azonnal udvarias elhárítás megy ki, amely felajánlja, miről tud beszélni. Ennek egyszerre szakmai és üzemeltetési haszna van — az asszisztens szerepben marad, a napi keret pedig nem fogy el olyan kérdésekre, amelyekre amúgy sem válaszolna.
+
+A témán **belül** viszont a modell szabadon fogalmaz: beszélhet arról, mi mozgatja az energiapiacot, miért ingadoznak az árak, mit jelent a megújulók terjedése a rendszerirányításnak. Ez szakmai kontextus — konkrét számot továbbra is kizárólag az adatcsomagból írhat.
+
+### Gyorsítótárazás és keretvédelem
+
+Minden adatállapot egyedi azonosítót kap. Ha ugyanahhoz az adatállapothoz már készült érvényes összefoglaló, a rendszer azt használja fel új hívás helyett. Erre három további réteg épül:
+
+- **Modell-lánc.** Négy Gemini-modell, mindegyiknek saját ingyenes kerete. Ha az elsőé betelt, a rendszer automatikusan a következőre lép.
+- **Keret-megszakító.** Kvótahiba után a rendszer egy ideig meg sem próbálja az adott modellt: a hívás nem fut ki időtúllépésre, a válasz azonnal megy.
+- **Nem várakozó gyártási zár.** Egyidejű látogatók egyetlen hívást váltanak ki; aki a záron kívül marad, azonnal a determinisztikus szöveget kapja ahelyett, hogy más hívása mögött várna.
+
+Ha a keret így is betelik, Flux **megmondja őszintén**, és a választ ugyanúgy megadja az élő adatokból.
 
 ### Auditálható szöveggenerálás
 
@@ -195,14 +367,58 @@ Minden generált összefoglalóhoz rögzül a generálás időpontja, az alapul 
 | Státusz | Jelentés |
 |---|---|
 | `gemini` | a Gemini által készített és elfogadott válasz |
-| `fallback` | determinisztikus sablonból készült válasz |
+| `fallback` | determinisztikus szövegképzésből származó válasz |
 | `rejected` | az ellenőrzésen elutasított modellválasz |
 
 ### Determinisztikus hibatűrés
 
-A Gemini válasza csak akkor jelenhet meg, ha megfelel az ellenőrzési szabályoknak. Ha a modell nem érhető el, túllépi az időkorlátot, hibás választ ad, **vagy olyan számot használ, amely nincs jelen az adatcsomagban**, a generált válasz nem kerül a felületre — helyette determinisztikus, az élő adatokból programozott szabályokkal összeállított szöveg jelenik meg.
+A Gemini válasza csak akkor jelenhet meg, ha megfelel az ellenőrzési szabályoknak. Ha a modell nem érhető el, túllépi az időkorlátot, hibás választ ad, **vagy olyan számot használ, amely nincs jelen az adatcsomagban**, a generált válasz nem kerül a felületre — helyette az élő adatokból programozott szabályokkal összeállított szöveg jelenik meg.
 
-Flux így nem egyszerű chatbot, hanem az OkosMérő ellenőrzött adataira épülő, gyorsítótárazott, auditálható és hibatűrő értelmezési réteg.
+A szám-ellenőrzés a logikai mezőket kizárja: Pythonban a `True` egészként is viselkedik, ezért enélkül minden logikai mező beengedte volna az `1`-et az elfogadott értékek közé.
+
+Flux így nem egyszerű chatbot, hanem az OkosMérő ellenőrzött adataira épülő, gyorsítótárazott, auditálható és hibatűrő értelmezési réteg — **API-keret nélkül is működőképes**.
+
+### Ellenőrizhető viselkedési szabályok
+
+Flux működése szándékosan **állításokra bontható**: minden szabályhoz tartozik egy megfigyelhető kimenet, amely automatizáltan is ellenőrizhető. Az alábbi táblázat a rendszer invariánsait foglalja össze.
+
+| # | Szabály | Elvárt viselkedés |
+|---|---|---|
+| F1 | Számhitelesség | A megjelenő szöveg egyetlen olyan számot sem tartalmazhat, amely nincs az adatcsomagban |
+| F2 | Logikai mezők | A `True`/`False` értékek nem kerülhetnek be az elfogadott számok közé |
+| F3 | Időzóna | Minden időpont Europe/Budapest falióra szerint értelmeződik, a kiszolgáló zónájától függetlenül |
+| F4 | Napszakhelyes igeidő | Ha a napi csúcs elmúlt, a rá vonatkozó mondat múlt időben áll |
+| F5 | Napelválasztás | A holnapi adat sosem jelenhet meg mai értékként, és fordítva |
+| F6 | Válaszkötelezettség | Nyelvi modell nélkül is érdemi, adatból számolt válasz készül |
+| F7 | Témahatár | Témán kívüli kérdés nem indít modellhívást |
+| F8 | Több részkérdés | Egy kérdés több témájára is válasz születik, nem csak az elsőre |
+| F9 | Köszönés | Munkamenetenként legfeljebb egyszer |
+| F10 | Kereten túl | Kvótahiba esetén a válasz megmarad, a rendszer jelzi az állapotot |
+
+### Kezelt határesetek
+
+A fejlesztés során az alábbi határesetek okoztak valós hibát; mindegyikhez tartozik javítás és ellenőrzés.
+
+| Határeset | Korábbi hibás viselkedés | Kezelés |
+|---|---|---|
+| Kiszolgáló UTC-ben jár | nyáron két óra csúszás a múlt/jövő szétválasztásban | falióra-alapú időkezelés |
+| A napelőtti sorozat 14:00 után átnyúl holnapra | a holnapi napelemcsúcs „ma várható" értékként jelent meg | dátum szerinti besorolás |
+| A megújuló összesítő a teljes sorozatot adta össze | másfél napnyi termelés jelent meg „a hátralévő órákra" | mai napra korlátozott összegzés |
+| Gyorsítótárazott köszöntő percre pontos órával | fél háromkor az egy órakor készült szöveg ment ki | a köszöntő mindig frissen készül |
+| Kerekítés és mondat ellentmondása | „gyakorlatilag ugyanannyi" mellett `+1%` jelent meg | egy százalék alatt tizedesjegy |
+| Az `Enter` után a fókusz a mezőben marad | a szöveg véglegesen befagyott | a szünetre felső időkorlát vonatkozik |
+| Másolás után a kijelölés megmarad | ugyanaz a befagyás | ugyanaz a felső időkorlát |
+| Rövid minta részszövegként illeszkedik | a „vacsorára" energiakérdésnek minősült | szóhatáron illesztés a rövid mintákra |
+| Több egyidejű látogató | ugyanarra az adatállapotra több párhuzamos modellhívás | nem várakozó gyártási zár |
+
+### Kézi ellenőrzési fogódzók
+
+| Mit néz | Hol |
+|---|---|
+| melyik `flux.js` fut a böngészőben | fejlesztői konzol: `[FLUX] flux.js verzió: …` |
+| be van-e kötve a nyelvi modell, melyik modellekkel | kiszolgálónapló induláskor: `[FLUX] Indulás — …` |
+| miért nem a modell válaszolt | kiszolgálónapló: kvóta, időtúllépés vagy ellenőrzési hiba, okkal együtt |
+| mely kérdésekhez nem talált témát | kiszolgálónapló: `[FLUX] Nem talált témát a kérdésre: …` |
 
 ---
 
@@ -326,15 +542,28 @@ DATABASE_URL=...
 | `ENTSOE_API_KEY` | ENTSO-E adatlekérések |
 | `VISUAL_CROSSING_KEY` | tartalék időjárási adatforrás |
 | `DATABASE_URL` | Supabase PostgreSQL-kapcsolat |
+| `GEMINI_API_KEY` | a Flux asszisztens nyelvi megfogalmazása (opcionális) |
+| `GEMINI_MODEL` | alapértelmezés: `gemini-2.5-flash` |
 
 A `DATABASE_URL` hiányában az alkalmazás futtatható, de az előrejelzési és anomálianaplózás kimarad.
+
+A `GEMINI_API_KEY` hiányában Flux **továbbra is válaszol**: a kérdésekre determinisztikus,
+közvetlenül az élő adatokból számolt választ ad. A Gemini csak a megfogalmazást
+gazdagítja, és a válasza is csak akkor jelenik meg, ha minden benne szereplő szám
+átment a `flux.py` szám-ellenőrzésén.
 
 **Indítás**
 
 ```bash
 python app.py          # fejlesztői mód, 8050 port
-gunicorn app:server    # éles indítás
+gunicorn app:server --workers 1 --threads 8 --timeout 120    # éles indítás
 ```
+
+A `--threads 8` fontos: a `gunicorn app:server` alapértelmezésben **egyetlen,
+egyszálú** worker, amelyben egyszerre egy kérés futhat. Így egy 30 perces
+adatfrissítés vagy egy Flux-kérdés idejére minden más látogató kérése sorban áll.
+Az éles indítási parancs a `Procfile`-ban is szerepel; ha a platformon (Render)
+külön Start Command van beállítva, ott is ezt kell megadni.
 
 ---
 
@@ -360,15 +589,3 @@ Az OkosMérő működő, nyilvánosan elérhető rendszer, amely jelenleg:
 - STL-alapú anomáliákat azonosít és naplóz
 - folyamatosan visszaméri saját előrejelzéseit a tényleges fogyasztáshoz
 - Flux asszisztenssel közérthetően összefoglalja az aktuális eredményeket
-
-
-
-| Terület | Alkalmazott technológia & Szemlélet | Vállalati megfelelője (Enterprise equivalent) |
-| :--- | :--- | :--- |
-| **AI Agent & Orchesztráció** | Karrier Ügynökök (CrewAI Multi-Agent) + Flux Asszisztens | **Azure AI Foundry** / **Azure OpenAI Service** / Copilot Studio |
-| **Operatív Adatbázis & Log** | Supabase PostgreSQL (`forecast_pending`, `forecast_log`, `stl_anomalia`) | Azure Database for PostgreSQL / Fabric |
-| **Adatpipeline & Aggregáció** | Python (`pandas`, `NumPy`), ENTSO-E, Open-Meteo REST API-k | Azure Data Factory / ETL Pipelines |
-| **Idősoros Predikció** | CatBoost V10 (100k+ rekordos mestertáblán, direkt többhorizontos jóslás) | Azure Machine Learning / Databricks |
-| **Anomáliadetektálás** | Gördülő STL dekompozíció + kontextusalapú kategorizálás | Azure AI Anomaly Detector |
-| **AI Asszisztens (RAG)** | Flux (Gemini API + Context Injection + LLM Guardrails) | Azure OpenAI Studio / RAG Architecture |
-| **Hibatűrés & Költségoptimalizálás** | Gyorsítótár, API-kvóta védelmi megszakító és determinisztikus tartalék-ág | Enterprise Resilience & Graceful Degradation |
