@@ -407,151 +407,61 @@ def get_validacio_adatok():
                           "homerseklet": float(r[2]) if r[2] is not None else None,
                           "kategoria": r[3]}
                          for r in cur.fetchall()]
-                cur.execute("""
-                    select last_processed_time at time zone 'Europe/Budapest'
-                    from public.stl_pipeline_state
-                    where pipeline = %s
-                """, (STL_PIPELINE_NAME,))
-                stl_state = cur.fetchone()
-                stl_feldolgozva = (stl_state[0].isoformat()
-                                   if stl_state and stl_state[0] is not None else None)
         return {"napok": napok, "osszes": osszes, "kategoriak": kat, "het": het,
-                "naplo": naplo, "stl_feldolgozva": stl_feldolgozva}
+                "naplo": naplo}
     except Exception as e:
         print(f"[HIBA] validacios adatok: {type(e).__name__}: {e}", flush=True)
         return None
 
-STL_PIPELINE_NAME = "stl_hourly_v3"
-STL_PROCESSING_START = pd.Timestamp("2026-08-04 00:00:00")
-STL_SAVE_LOCK = threading.Lock()
+def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map, dam_oras):
+    """STL-anomáliák mentése teljes kontextussal (fogyasztás + időjárás + ár).
 
-
-def _stl_local_hour(value):
-    """Budapesti, időzóna nélküli órabélyeg az adatbázis-állapothoz."""
-    ts = pd.Timestamp(value)
-    if ts.tzinfo is not None:
-        ts = ts.tz_convert(BUDAPEST_TZ).tz_localize(None)
-    return ts.floor("h")
-
-
-def _stl_contiguous_end(load_series, start, latest_closed):
-    """Az első adathiány előtti utolsó folyamatos óra."""
-    idx = pd.DatetimeIndex(load_series.index)
-    if idx.tz is not None:
-        idx = idx.tz_convert(BUDAPEST_TZ).tz_localize(None)
-    else:
-        idx = idx.tz_localize(None)
-    available = set(idx.floor("h"))
-    last = None
-    for t in pd.date_range(start, latest_closed, freq="h"):
-        if t not in available:
-            break
-        last = t
-    return last
-
-
-def save_stl_anomalies(load_series, stl_res, kuszob, atlag,
-                       ido_map=None, dam_oras=None):
-    """Az eredeti STL-futás új óráinak automatikus, egyszeri mentése.
-
-    A függvény NEM számolja újra és NEM módosítja az STL-modellt. Pontosan a
-    hívó kódban már elkészült `stl_res`, `atlag` és `kuszob` eredményt használja.
-    A `stl_pipeline_state` csak azt jegyzi meg, meddig vizsgálta meg a lezárt
-    órákat. Meglévő `stl_anomalia` sort nem ír felül.
-    """
+    Csak a küszöböt átlépő órák kerülnek be. Az időjárás/ár oszlopok
+    None-ok maradnak, ha az adott óra kívül esik a lekért ablakon —
+    a friss anomáliáknál mindig lesz kontextus."""
     if not _db_available():
-        return {"processed": 0, "inserted": 0}
-
-    ido_map = ido_map or {}
-    dam_oras = dam_oras or {}
+        return
     resid = stl_res.resid
     mask = abs(resid - atlag) > kuszob
+    if not mask.any():
+        return
 
-    with STL_SAVE_LOCK:
-        try:
-            with _db_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        select last_processed_time
-                        from public.stl_pipeline_state
-                        where pipeline = %s
-                    """, (STL_PIPELINE_NAME,))
-                    row = cur.fetchone()
-                    last_processed = row[0] if row else None
-        except Exception as e:
-            print(f"[HIBA] STL feldolgozási állapot: {type(e).__name__}: {e}", flush=True)
-            return {"processed": 0, "inserted": 0}
-
-        latest_data = _stl_local_hour(load_series.index.max())
-        latest_closed = _stl_local_hour(_helyi_most()) - pd.Timedelta(hours=1)
-        latest = min(latest_data, latest_closed)
-        start = (STL_PROCESSING_START if last_processed is None else
-                 max(STL_PROCESSING_START,
-                     _stl_local_hour(last_processed) + pd.Timedelta(hours=1)))
-        if start > latest:
-            return {"processed": 0, "inserted": 0}
-
-        processed_end = _stl_contiguous_end(load_series, start, latest)
-        if processed_end is None:
-            print(f"[INFO] STL: hiányzó bemenő óra {start} — feldolgozás várakozik", flush=True)
-            return {"processed": 0, "inserted": 0}
-
-        target_index = pd.date_range(start, processed_end, freq="h")
-        anomaly_times = [t for t in target_index
-                         if t in resid.index and bool(mask.loc[t])]
-
-        insert_sql = """
-            insert into public.stl_anomalia (
-                target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
-                homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
-                dam_eur_mwh, ora, hetvege, unnepnap, kategoria
-            ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            on conflict (target_time) do nothing
-        """
-        rows = []
-        for t in anomaly_times:
-            w = ido_map.get(t) or {}
-            actual = float(load_series.loc[t])
-            residual = float(resid.loc[t])
-            rows.append((
-                _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
-                actual, actual - residual, residual, float(kuszob),
-                float(w["Homerseklet_C"]) if w.get("Homerseklet_C") is not None else None,
-                float(w["Szelsebesseg_kmh"]) if w.get("Szelsebesseg_kmh") is not None else None,
-                float(w["Napsugarzas_W_m2"]) if w.get("Napsugarzas_W_m2") is not None else None,
-                float(w["Csapadek_mm"]) if w.get("Csapadek_mm") is not None else None,
-                float(dam_oras[t]) if t in dam_oras else None,
-                int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
-                _anomalia_kategoria(t, residual, w if w else None, ido_map),
-            ))
-
-        state_sql = """
-            insert into public.stl_pipeline_state
-                (pipeline, last_processed_time, updated_at)
-            values (%s, %s, now())
-            on conflict (pipeline) do update set
-                last_processed_time = excluded.last_processed_time,
-                updated_at = now()
-        """
-        try:
-            with _db_connect() as conn:
-                with conn.cursor() as cur:
-                    if rows:
-                        cur.executemany(insert_sql, rows)
-                    cur.execute(state_sql, (
-                        STL_PIPELINE_NAME,
-                        _aware_budapest(processed_end).tz_convert("UTC").to_pydatetime(),
-                    ))
-            processed = len(target_index)
-            print(
-                f"[INFO] STL: {processed} lezart ora megvizsgalva, "
-                f"{len(rows)} uj anomalia jelolve; utolso={processed_end}",
-                flush=True,
-            )
-            return {"processed": processed, "inserted": len(rows)}
-        except Exception as e:
-            print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
-            return {"processed": 0, "inserted": 0}
+    sql = """
+        insert into public.stl_anomalia (
+            target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
+            homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
+            dam_eur_mwh, ora, hetvege, unnepnap, kategoria
+        ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        on conflict (target_time) do update set
+            kategoria = coalesce(excluded.kategoria, public.stl_anomalia.kategoria),
+            residual_mwh = excluded.residual_mwh,
+            expected_mwh = excluded.expected_mwh,
+            threshold_mwh = excluded.threshold_mwh
+    """
+    rows = []
+    for t in resid.index[mask]:
+        w = ido_map.get(t) or {}
+        tny = float(load_series.loc[t])
+        r = float(resid.loc[t])
+        rows.append((
+            _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
+            tny, tny - r, r, float(kuszob),
+            float(w["Homerseklet_C"]) if w else None,
+            float(w["Szelsebesseg_kmh"]) if w else None,
+            float(w["Napsugarzas_W_m2"]) if w else None,
+            float(w["Csapadek_mm"]) if w else None,
+            float(dam_oras[t]) if t in dam_oras else None,
+            int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
+            _anomalia_kategoria(t, r, w if w else None, ido_map),
+        ))
+    try:
+        with _db_connect() as conn:
+            with conn.cursor() as cur:
+                for r in rows:
+                    cur.execute(sql, r)
+        print(f"[INFO] stl_anomalia: {len(rows)} ora mentve/frissitve", flush=True)
+    except Exception as e:
+        print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
 
 
 C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a2d42',
@@ -1633,11 +1543,10 @@ def fetch(n,_manual):
                 "anomalia_db":int(mask.sum()),
                 "stat":{"std":std,"mean":mean,"kuszob":kuszob,
                     "irany":"emelkedő" if res.trend.iloc[-1]>res.trend.iloc[-24] else "csökkenő"}}
-            save_stl_anomalies(
-                s, res, kuszob, mean,
-                ({r["Datum"]: r for r in ido_df.to_dict("records")} if ido_ok else {}),
-                (dam_oras if dam_ok else {}),
-            )
+            if ido_ok and dam_ok:
+                save_stl_anomalies(s, res, kuszob, mean,
+                    {r["Datum"]: r for r in ido_df.to_dict("records")},
+                    dam_oras)
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
@@ -2925,17 +2834,10 @@ def _reziduum_panel(stl, naplo):
     ], style=CS)
 
 
-def _anomalia_naplo_panel(naplo, feldolgozva=None):
-    feld_txt = ""
-    if feldolgozva:
-        try:
-            feld_dt = datetime.fromisoformat(feldolgozva)
-            feld_txt = f" · STL feldolgozva: {feld_dt:%m.%d. %H:%M}-ig"
-        except (TypeError, ValueError):
-            feld_txt = ""
+def _anomalia_naplo_panel(naplo):
     cim = [html.Div("ANOMÁLIA-NAPLÓ",
                style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
-           html.Div(f"Utolsó 7 nap · {len(naplo or [])} esemény · legfrissebb elöl{feld_txt}",
+           html.Div("Utolsó 7 nap · legfrissebb elöl · minden eset tartósan tárolva",
                style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 12px"})]
     if not naplo:
         return html.Div([*cim,
@@ -2943,7 +2845,7 @@ def _anomalia_naplo_panel(naplo, feldolgozva=None):
                      "megszokott sávban mozog.",
                 style={"fontSize":"11px","color":C['gr']})], style=CS)
     sorok = []
-    for r in naplo:
+    for r in naplo[:9]:
         dt = datetime.fromisoformat(r["ido"])
         kat = r.get("kategoria")
         szin = KAT_SZIN.get(kat, "#94a3b8")
@@ -2972,10 +2874,10 @@ def _anomalia_naplo_panel(naplo, feldolgozva=None):
         ], style={"display":"flex","alignItems":"center","gap":"10px",
             "background":C['card2'],"borderLeft":f"3px solid {szin}",
             "borderRadius":"8px","padding":"7px 10px","marginBottom":"5px"}))
-    return html.Div([*cim,
-        html.Div(sorok, style={"maxHeight":"390px","overflowY":"auto",
-                              "paddingRight":"4px"})
-    ], style=CS)
+    if len(naplo) > 9:
+        sorok.append(html.Div(f"… és további {len(naplo)-9} eset a 7 napból",
+            style={"fontSize":"10px","color":C['mut'],"marginTop":"6px"}))
+    return html.Div([*cim, *sorok], style=CS)
 
 
 def _stl_ador_nagy(naplo, kategoriak):
@@ -3205,7 +3107,7 @@ def mllabor(data):
             "fontWeight":"600","color":C['wh'],"marginBottom":"14px"}),
         dbc.Row([
             dbc.Col(_reziduum_panel(data.get("stl"), naplo), lg=8, md=12),
-            dbc.Col(_anomalia_naplo_panel(naplo, v.get("stl_feldolgozva")), lg=4, md=12),
+            dbc.Col(_anomalia_naplo_panel(naplo), lg=4, md=12),
         ], className="g-3 mb-3"),
         dbc.Row([
             dbc.Col(_stl_ador_nagy(naplo, v.get("kategoriak")), md=12)
