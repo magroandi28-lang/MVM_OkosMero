@@ -49,18 +49,7 @@ BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 hu_holidays = holidays.Hungary(years=list(range(2015,2028)))
 
 MODEL_VERSION = "catboost-v10"
-def mad_kuszob(resid, szorzo=3.0):
-    """Robusztus MAD (Median Absolute Deviation) alapú küszöb.
-    A régi 2.5 * std helyett. A nagy anomáliák megmaradnak, a zaj csökken."""
-    resid = pd.Series(resid).dropna()
-    if len(resid) < 24:
-        return float(resid.mean()), float(2.5 * resid.std())
-    median = float(np.median(resid))
-    mad = float(np.median(np.abs(resid - median)))
-    if mad < 1e-6:
-        mad = float(resid.std()) or 1.0
-    kuszob = szorzo * 1.4826 * mad
-    return median, kuszob
+
 
 def _db_available():
     if not DATABASE_URL:
@@ -1532,7 +1521,7 @@ def fetch(n,_manual):
         except Exception as e:
             print(f"[HIBA] Megújuló idősor: {e}", flush=True)
 
-        stl_data = None
+    stl_data = None
     stl_napok = 0
     if load_ok:
         try:
@@ -1541,9 +1530,8 @@ def fetch(n,_manual):
             s = load.tail(720) if len(load)>=720 else load
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
-            mean, kuszob = mad_kuszob(res.resid, szorzo=3.0)
-            std = float(res.resid.std())
-            mask = abs(res.resid - mean) > kuszob
+            std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
+            mask=abs(res.resid-mean)>kuszob
             # A négy idősor 0,1 MWh-ra kerekítve megy a böngészőbe. Teljes
             # lebegőpontos alakban négyszer ~700 érték a `dcc.Store` JSON
             # méretének a nagy részét adta, miközben a grafikonokon egy MWh
@@ -2857,7 +2845,7 @@ def _anomalia_naplo_panel(naplo):
                      "megszokott sávban mozog.",
                 style={"fontSize":"11px","color":C['gr']})], style=CS)
     sorok = []
-    for r in naplo[:25]:
+    for r in naplo[:9]:
         dt = datetime.fromisoformat(r["ido"])
         kat = r.get("kategoria")
         szin = KAT_SZIN.get(kat, "#94a3b8")
@@ -2886,16 +2874,11 @@ def _anomalia_naplo_panel(naplo):
         ], style={"display":"flex","alignItems":"center","gap":"10px",
             "background":C['card2'],"borderLeft":f"3px solid {szin}",
             "borderRadius":"8px","padding":"7px 10px","marginBottom":"5px"}))
-    if len(naplo) > 25:
-        sorok.append(html.Div(f"… és további {len(naplo)-25} eset a 7 napból",
+    if len(naplo) > 9:
+        sorok.append(html.Div(f"… és további {len(naplo)-9} eset a 7 napból",
             style={"fontSize":"10px","color":C['mut'],"marginTop":"6px"}))
-    lista = html.Div(sorok, style={
-        "maxHeight": "380px",
-        "overflowY": "auto",
-        "paddingRight": "4px"
-    })
-    return html.Div([*cim, lista], style=CS)
-    
+    return html.Div([*cim, *sorok], style=CS)
+
 
 def _stl_ador_nagy(naplo, kategoriak):
     """A 3. oldal alsó, kinagyított mérlege: négy kategória-csempe,
