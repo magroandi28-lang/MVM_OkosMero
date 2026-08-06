@@ -407,94 +407,151 @@ def get_validacio_adatok():
                           "homerseklet": float(r[2]) if r[2] is not None else None,
                           "kategoria": r[3]}
                          for r in cur.fetchall()]
+                cur.execute("""
+                    select last_processed_time at time zone 'Europe/Budapest'
+                    from public.stl_pipeline_state
+                    where pipeline = %s
+                """, (STL_PIPELINE_NAME,))
+                stl_state = cur.fetchone()
+                stl_feldolgozva = (stl_state[0].isoformat()
+                                   if stl_state and stl_state[0] is not None else None)
         return {"napok": napok, "osszes": osszes, "kategoriak": kat, "het": het,
-                "naplo": naplo}
+                "naplo": naplo, "stl_feldolgozva": stl_feldolgozva}
     except Exception as e:
         print(f"[HIBA] validacios adatok: {type(e).__name__}: {e}", flush=True)
         return None
 
-STL_BACKFILL_FROM = pd.Timestamp("2026-08-04 00:00:00")
-STL_BACKFILL_TO = pd.Timestamp("2026-08-06 22:00:00")
+STL_PIPELINE_NAME = "stl_hourly_v3"
+STL_PROCESSING_START = pd.Timestamp("2026-08-04 00:00:00")
+STL_SAVE_LOCK = threading.Lock()
 
 
-def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map=None, dam_oras=None):
-    """Egyszeri 08.04–08.06 visszatöltés, utána csak a legutóbbi lezárt óra.
+def _stl_local_hour(value):
+    """Budapesti, időzóna nélküli órabélyeg az adatbázis-állapothoz."""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(BUDAPEST_TZ).tz_localize(None)
+    return ts.floor("h")
 
-    A múltat nem számolja újra folyamatosan, és meglévő sort soha nem ír felül.
-    Az időjárás és a DAM csak kiegészítő kontextus: hiányuk nem blokkolja az STL-t.
+
+def _stl_contiguous_end(load_series, start, latest_closed):
+    """Az első adathiány előtti utolsó folyamatos óra."""
+    idx = pd.DatetimeIndex(load_series.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert(BUDAPEST_TZ).tz_localize(None)
+    else:
+        idx = idx.tz_localize(None)
+    available = set(idx.floor("h"))
+    last = None
+    for t in pd.date_range(start, latest_closed, freq="h"):
+        if t not in available:
+            break
+        last = t
+    return last
+
+
+def save_stl_anomalies(load_series, stl_res, kuszob, atlag,
+                       ido_map=None, dam_oras=None):
+    """Az eredeti STL-futás új óráinak automatikus, egyszeri mentése.
+
+    A függvény NEM számolja újra és NEM módosítja az STL-modellt. Pontosan a
+    hívó kódban már elkészült `stl_res`, `atlag` és `kuszob` eredményt használja.
+    A `stl_pipeline_state` csak azt jegyzi meg, meddig vizsgálta meg a lezárt
+    órákat. Meglévő `stl_anomalia` sort nem ír felül.
     """
     if not _db_available():
-        return
+        return {"processed": 0, "inserted": 0}
 
     ido_map = ido_map or {}
     dam_oras = dam_oras or {}
     resid = stl_res.resid
     mask = abs(resid - atlag) > kuszob
 
-    try:
-        with _db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    select exists (
-                        select 1 from public.stl_anomalia
-                        where target_time >= %s and target_time <= %s
-                    )
-                """, (
-                    _aware_budapest(STL_BACKFILL_FROM).tz_convert("UTC").to_pydatetime(),
-                    _aware_budapest(STL_BACKFILL_TO).tz_convert("UTC").to_pydatetime(),
-                ))
-                backfill_kesz = bool(cur.fetchone()[0])
-    except Exception as e:
-        print(f"[HIBA] STL backfill-allapot: {type(e).__name__}: {e}", flush=True)
-        return
+    with STL_SAVE_LOCK:
+        try:
+            with _db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        select last_processed_time
+                        from public.stl_pipeline_state
+                        where pipeline = %s
+                    """, (STL_PIPELINE_NAME,))
+                    row = cur.fetchone()
+                    last_processed = row[0] if row else None
+        except Exception as e:
+            print(f"[HIBA] STL feldolgozási állapot: {type(e).__name__}: {e}", flush=True)
+            return {"processed": 0, "inserted": 0}
 
-    jeloltek = []
-    if not backfill_kesz:
-        # Pontosan egyszer tölti vissza a hiányzó 08.04–08.06 időszakot.
-        jeloltek.extend(t for t in resid.index[mask]
-                        if STL_BACKFILL_FROM <= pd.Timestamp(t) <= STL_BACKFILL_TO)
+        latest_data = _stl_local_hour(load_series.index.max())
+        latest_closed = _stl_local_hour(_helyi_most()) - pd.Timedelta(hours=1)
+        latest = min(latest_data, latest_closed)
+        start = (STL_PROCESSING_START if last_processed is None else
+                 max(STL_PROCESSING_START,
+                     _stl_local_hour(last_processed) + pd.Timedelta(hours=1)))
+        if start > latest:
+            return {"processed": 0, "inserted": 0}
 
-    # A rendes élő működés kizárólag a legutóbbi lezárt mért órát vizsgálja.
-    legutolso = pd.Timestamp(load_series.index.max())
-    if legutolso > STL_BACKFILL_TO and bool(mask.get(legutolso, False)):
-        jeloltek.append(legutolso)
+        processed_end = _stl_contiguous_end(load_series, start, latest)
+        if processed_end is None:
+            print(f"[INFO] STL: hiányzó bemenő óra {start} — feldolgozás várakozik", flush=True)
+            return {"processed": 0, "inserted": 0}
 
-    # Egy időpont legfeljebb egyszer szerepeljen.
-    jeloltek = sorted(set(pd.Timestamp(t) for t in jeloltek))
-    if not jeloltek:
-        return
+        target_index = pd.date_range(start, processed_end, freq="h")
+        anomaly_times = [t for t in target_index
+                         if t in resid.index and bool(mask.loc[t])]
 
-    sql = """
-        insert into public.stl_anomalia (
-            target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
-            homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
-            dam_eur_mwh, ora, hetvege, unnepnap, kategoria
-        ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        on conflict (target_time) do nothing
-    """
-    rows = []
-    for t in jeloltek:
-        w = ido_map.get(t) or {}
-        tny = float(load_series.loc[t])
-        r = float(resid.loc[t])
-        rows.append((
-            _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
-            tny, tny - r, r, float(kuszob),
-            float(w["Homerseklet_C"]) if w and w.get("Homerseklet_C") is not None else None,
-            float(w["Szelsebesseg_kmh"]) if w and w.get("Szelsebesseg_kmh") is not None else None,
-            float(w["Napsugarzas_W_m2"]) if w and w.get("Napsugarzas_W_m2") is not None else None,
-            float(w["Csapadek_mm"]) if w and w.get("Csapadek_mm") is not None else None,
-            float(dam_oras[t]) if t in dam_oras else None,
-            int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
-            _anomalia_kategoria(t, r, w if w else None, ido_map),
-        ))
-    try:
-        with _db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.executemany(sql, rows)
-        print(f"[INFO] stl_anomalia: {len(rows)} uj ora ellenorizve/mentve", flush=True)
-    except Exception as e:
-        print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
+        insert_sql = """
+            insert into public.stl_anomalia (
+                target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
+                homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
+                dam_eur_mwh, ora, hetvege, unnepnap, kategoria
+            ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            on conflict (target_time) do nothing
+        """
+        rows = []
+        for t in anomaly_times:
+            w = ido_map.get(t) or {}
+            actual = float(load_series.loc[t])
+            residual = float(resid.loc[t])
+            rows.append((
+                _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
+                actual, actual - residual, residual, float(kuszob),
+                float(w["Homerseklet_C"]) if w.get("Homerseklet_C") is not None else None,
+                float(w["Szelsebesseg_kmh"]) if w.get("Szelsebesseg_kmh") is not None else None,
+                float(w["Napsugarzas_W_m2"]) if w.get("Napsugarzas_W_m2") is not None else None,
+                float(w["Csapadek_mm"]) if w.get("Csapadek_mm") is not None else None,
+                float(dam_oras[t]) if t in dam_oras else None,
+                int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
+                _anomalia_kategoria(t, residual, w if w else None, ido_map),
+            ))
+
+        state_sql = """
+            insert into public.stl_pipeline_state
+                (pipeline, last_processed_time, updated_at)
+            values (%s, %s, now())
+            on conflict (pipeline) do update set
+                last_processed_time = excluded.last_processed_time,
+                updated_at = now()
+        """
+        try:
+            with _db_connect() as conn:
+                with conn.cursor() as cur:
+                    if rows:
+                        cur.executemany(insert_sql, rows)
+                    cur.execute(state_sql, (
+                        STL_PIPELINE_NAME,
+                        _aware_budapest(processed_end).tz_convert("UTC").to_pydatetime(),
+                    ))
+            processed = len(target_index)
+            print(
+                f"[INFO] STL: {processed} lezart ora megvizsgalva, "
+                f"{len(rows)} uj anomalia jelolve; utolso={processed_end}",
+                flush=True,
+            )
+            return {"processed": processed, "inserted": len(rows)}
+        except Exception as e:
+            print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
+            return {"processed": 0, "inserted": 0}
 
 
 C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a2d42',
@@ -2737,43 +2794,115 @@ def _ts_naiv(iso):
 
 
 def _reziduum_panel(stl, naplo):
-    """Aktuális, egységes STL-számítás: a vonal, küszöb és pontok ugyanabból a futásból."""
+    """Az STL reziduuma az utolsó 7 napon, ±2,5σ küszöbbel. A küszöböt
+    átlépő órák a kategóriájuk színét kapják — így a grafikon és a napló
+    ugyanazt a nyelvet beszéli."""
     if not stl or not stl.get("idok"):
         return hianyzo_panel("REZIDUUM ÉS ANOMÁLIÁK",
             "Kevés élő mérési adat az elemzéshez.")
+    idok = [datetime.fromisoformat(t) for t in stl["idok"]]
+    resid = [float(x) for x in stl["residual"]]
+    n7 = 7 * 24
+    idok = idok[-n7:]; resid = resid[-n7:]
+    stat = stl["stat"]; kuszob = float(stat["kuszob"]); atlag = float(stat["mean"])
 
-    idok = [datetime.fromisoformat(t) for t in stl["idok"]][-7*24:]
-    resid = [float(x) for x in stl["residual"]][-7*24:]
-    stat = stl["stat"]
-    kuszob = float(stat["kuszob"])
-    atlag = float(stat["mean"])
-    also, felso = atlag - kuszob, atlag + kuszob
+    # A naplóban szereplő órák — időbélyeg szerint. A napló a FELISMERÉS
+    # pillanatában mért reziduumot is tárolja; ez a hiteles érték, mert az
+    # akkori küszöbhöz mérve lépte át a határt.
+    naplo_map = {}
+    for r in (naplo or []):
+        t_ = _ts_naiv(r.get("ido"))
+        if t_ is not None:
+            naplo_map[t_] = r
 
+    # A VONAL is a felismeréskori értéket veszi át azokban az órákban, amelyek
+    # a naplóban szerepelnek.
+    #
+    # Enélkül a grafikonon két különböző sorozat keveredett: a kék vonal a MAI
+    # újraszámolás, a pontok a TÁROLT érték — így a pontok a levegőben lógtak,
+    # jóval a vonal fölött. Egy sorozatot mutatunk: ahol a rendszer annak idején
+    # rögzítette a maradékot, ott az a hiteles érték; a többi órán a mostani
+    # számítás adja a kontextust. Így a kiugrások a vonalon is látszanak, a
+    # pontok rajta ülnek, és mind átlépi a küszöböt.
+    for i, t_ in enumerate(idok):
+        r = naplo_map.get(t_)
+        if not r:
+            continue
+        try:
+            resid[i] = float(r["residual"])
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    fig = go.Figure()
+    fig.add_hline(y=atlag + kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
+    fig.add_hline(y=atlag - kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
+    fig.add_annotation(x=idok[0], y=atlag + kuszob, text="+2,5σ", showarrow=False,
+        yanchor="bottom", xanchor="left", font=dict(size=9, color=C['rd']))
+    fig.add_annotation(x=idok[0], y=atlag - kuszob, text="−2,5σ", showarrow=False,
+        yanchor="top", xanchor="left", font=dict(size=9, color=C['rd']))
+    # A buborék szövegét PYTHONBAN állítjuk elő, és a sablon csak kiírja.
+    #
+    # A `%{y:+,.0f}` formátum elvileg helyes, a gyakorlatban mégis nyers
+    # lebegőpontos érték jelent meg (-479.500305202605). A böngészőoldali
+    # számformázásra nem érdemes hagyatkozni, ha egy `f-string` ugyanezt
+    # biztosan megoldja: itt már nincs mit félreértelmezni.
     def _mwh(v):
         return f"{v:+,.0f} MWh".replace(",", " ")
 
-    fig = go.Figure()
-    fig.add_hline(y=felso, line=dict(color=C['rd'], width=1, dash="dash"))
-    fig.add_hline(y=also, line=dict(color=C['rd'], width=1, dash="dash"))
-    fig.add_annotation(x=idok[0], y=felso, text="+2,5σ", showarrow=False,
-        yanchor="bottom", xanchor="left", font=dict(size=9, color=C['rd']))
-    fig.add_annotation(x=idok[0], y=also, text="−2,5σ", showarrow=False,
-        yanchor="top", xanchor="left", font=dict(size=9, color=C['rd']))
     fig.add_trace(go.Scatter(x=idok, y=resid, mode="lines",
         line=dict(color="#4b9cd3", width=1.5),
         customdata=[_mwh(v) for v in resid],
         hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}<extra>reziduum</extra>",
         showlegend=False))
 
-    ax, ay = [], []
-    for t, r in zip(idok, resid):
-        if r < also or r > felso:
-            ax.append(t); ay.append(r)
-    if ax:
-        fig.add_trace(go.Scatter(x=ax, y=ay, mode="markers", name="aktuális anomália",
-            marker=dict(size=8, color=C['rd'], line=dict(width=1, color="rgba(255,255,255,.65)")),
-            customdata=[_mwh(v) for v in ay],
-            hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}<extra>aktuális anomália</extra>"))
+    # A pontok a NAPLÓBÓL jönnek, nem újraszámolt küszöbpróbából.
+    #
+    # Korábban a grafikon maga döntötte el, mi számít anomáliának: minden
+    # betöltéskor újrafuttatta az `|reziduum - átlag| > küszöb` próbát a FRISSEN
+    # számolt STL-en. Csakhogy az STL gördülő felbontás — ahogy új órák
+    # érkeznek, a trend és a napi ritmus újraillesztődik, és ugyanannak az
+    # órának megváltozik a maradéka. Emiatt a naplóban szereplő, egyszer már
+    # felismert órák a grafikonról eltűntek (velük a jelmagyarázat is), és a
+    # két nézet ellentmondott egymásnak — pedig a panel alcíme épp azt ígéri,
+    # hogy ugyanazt a nyelvet beszélik.
+    #
+    # Mostantól a napló a hiteles forrás: azokat az órákat jelöljük, amelyeket
+    # a rendszer annak idején — az AKKORI küszöbhöz mérve — anomáliának ismert
+    # fel, és a felismeréskor mért reziduummal rajzoljuk ki őket.
+    # A pont a FELISMERÉSKOR mért reziduumon ül — ezt az értéket NEM számoljuk
+    # újra.
+    #
+    # Az STL gördülő felbontás: minden oldalbetöltéskor újrailleszti a trendet
+    # és a napi ritmust a legutóbbi ~408 órára. Egy óra maradéka ettől
+    # megváltozik — ami tegnap este -730 MWh volt, ma ugyanarra az órára +300.
+    # Emiatt a korábban felismert anomáliák előbb eltűntek a grafikonról, majd
+    # amikor a mai görbére tettem őket, a küszöbön BELÜLRE kerültek, holott az
+    # alcím azt ígéri, hogy átlépik. Mindkettő félrevezető volt.
+    #
+    # Ami egy adott napon anomália volt, az anomália is marad: a napló őrzi az
+    # akkor mért értéket, és a grafikon ezt mutatja. Így a hét kiugrásai
+    # együtt, változatlanul látszanak.
+    # A pontok ugyanabból a sorozatból jönnek, amit a vonal is rajzol — így
+    # nem tudnak elcsúszni egymástól.
+    resid_map = dict(zip(idok, resid))
+    csoportok = {}
+    for t_ in idok:
+        r = naplo_map.get(t_)
+        if not r:
+            continue
+        kat = r.get("kategoria")
+        cs = csoportok.setdefault(kat, {"x": [], "y": [], "txt": []})
+        cs["x"].append(t_); cs["y"].append(resid_map[t_])
+        cs["txt"].append(_mwh(resid_map[t_]))
+    for kat, pontok in csoportok.items():
+        szin = KAT_SZIN.get(kat, "#94a3b8")
+        nev = KAT_NEV.get(kat, "besorolás előtti")
+        fig.add_trace(go.Scatter(x=pontok["x"], y=pontok["y"], mode="markers",
+            name=nev, marker=dict(size=8, color=szin,
+                line=dict(width=1, color="rgba(255,255,255,.6)")),
+            customdata=pontok["txt"],
+            hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}"
+                          "<extra>" + nev + "</extra>"))
 
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         font=dict(color=C['mut'], family='Inter,sans-serif', size=10),
@@ -2788,15 +2917,25 @@ def _reziduum_panel(stl, naplo):
     return html.Div([
         html.Div("REZIDUUM ÉS ANOMÁLIÁK — UTOLSÓ 7 NAP",
             style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
-        html.Div("Aktuális STL-számítás · a piros pontok és a ±2,5σ küszöb ugyanabból a futásból származnak",
+        html.Div("Mért fogyasztás mínusz trend és napi ritmus · a színes pontok a "
+                 "±2,5σ küszöböt átlépő, osztályozott órák a felismerés napján "
+                 "mért értékükkel",
             style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 8px"}),
         dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height":"320px"})
     ], style=CS)
 
-def _anomalia_naplo_panel(naplo):
+
+def _anomalia_naplo_panel(naplo, feldolgozva=None):
+    feld_txt = ""
+    if feldolgozva:
+        try:
+            feld_dt = datetime.fromisoformat(feldolgozva)
+            feld_txt = f" · STL feldolgozva: {feld_dt:%m.%d. %H:%M}-ig"
+        except (TypeError, ValueError):
+            feld_txt = ""
     cim = [html.Div("ANOMÁLIA-NAPLÓ",
                style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
-           html.Div("Utolsó 7 nap · legfrissebb elöl · minden eset tartósan tárolva",
+           html.Div(f"Utolsó 7 nap · {len(naplo or [])} esemény · legfrissebb elöl{feld_txt}",
                style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 12px"})]
     if not naplo:
         return html.Div([*cim,
@@ -2834,7 +2973,8 @@ def _anomalia_naplo_panel(naplo):
             "background":C['card2'],"borderLeft":f"3px solid {szin}",
             "borderRadius":"8px","padding":"7px 10px","marginBottom":"5px"}))
     return html.Div([*cim,
-        html.Div(sorok, style={"maxHeight":"390px","overflowY":"auto","paddingRight":"4px"})
+        html.Div(sorok, style={"maxHeight":"390px","overflowY":"auto",
+                              "paddingRight":"4px"})
     ], style=CS)
 
 
@@ -3065,7 +3205,7 @@ def mllabor(data):
             "fontWeight":"600","color":C['wh'],"marginBottom":"14px"}),
         dbc.Row([
             dbc.Col(_reziduum_panel(data.get("stl"), naplo), lg=8, md=12),
-            dbc.Col(_anomalia_naplo_panel(naplo), lg=4, md=12),
+            dbc.Col(_anomalia_naplo_panel(naplo, v.get("stl_feldolgozva")), lg=4, md=12),
         ], className="g-3 mb-3"),
         dbc.Row([
             dbc.Col(_stl_ador_nagy(naplo, v.get("kategoriak")), md=12)
