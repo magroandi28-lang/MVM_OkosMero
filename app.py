@@ -464,95 +464,6 @@ def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map, dam_oras):
         print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
 
 
-def backfill_missing_stl_days(load, ido_map, dam_oras, napok=3):
-    """Hianyzó napok utolagos feltoltese naponta vagott STL-ablakkal.
-
-    Csak a kuszobot tenyleg atlepo orak kerulnek be. Nincs kenyszeritett
-    top-N insert — ha egy napon 0 a kuszobatlepes, a nap uresen marad.
-    """
-    if not _db_available() or load is None or len(load) < 48:
-        return
-    most = _helyi_most()
-    ido_map = ido_map or {}
-    dam_oras = dam_oras or {}
-
-    sql = """
-        insert into public.stl_anomalia (
-            target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
-            homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
-            dam_eur_mwh, ora, hetvege, unnepnap, kategoria
-        ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        on conflict (target_time) do update set
-            kategoria = coalesce(excluded.kategoria, public.stl_anomalia.kategoria),
-            residual_mwh = excluded.residual_mwh,
-            expected_mwh = excluded.expected_mwh,
-            threshold_mwh = excluded.threshold_mwh
-    """
-
-    for d in range(0, napok):
-        nap = (most - timedelta(days=d)).date()
-        try:
-            with _db_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """select count(*) from public.stl_anomalia
-                           where (target_time at time zone 'Europe/Budapest')::date = %s""",
-                        (nap,))
-                    cnt = int(cur.fetchone()[0] or 0)
-        except Exception as e:
-            print(f"[HIBA] backfill count {nap}: {e}", flush=True)
-            continue
-        if cnt > 0:
-            print(f"[INFO] backfill {nap}: mar van {cnt} sor — kihagyva", flush=True)
-            continue
-
-        if d == 0:
-            cutoff = load.index.max()
-        else:
-            cutoff = pd.Timestamp(datetime(nap.year, nap.month, nap.day, 23, 0, 0))
-        s_day = load[load.index <= cutoff]
-        if len(s_day) < 48:
-            print(f"[INFO] backfill {nap}: keves adat ({len(s_day)})", flush=True)
-            continue
-        s_day = s_day.tail(720) if len(s_day) >= 720 else s_day
-        try:
-            res = STL(s_day, period=24, seasonal=25, robust=True).fit()
-            std = float(res.resid.std())
-            mean = float(res.resid.mean())
-            kuszob = 2.5 * std
-            resid = res.resid
-            day_idx = [t for t in resid.index
-                       if t.date() == nap and abs(float(resid.loc[t]) - mean) > kuszob]
-            if not day_idx:
-                print(f"[INFO] backfill {nap}: 0 kuszobot atlepo ora "
-                      f"(kuszob={kuszob:.1f} mean={mean:.1f})", flush=True)
-                continue
-            rows = []
-            for t in day_idx:
-                w = ido_map.get(t) or {}
-                tny = float(s_day.loc[t])
-                r = float(resid.loc[t])
-                rows.append((
-                    _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
-                    tny, tny - r, r, float(kuszob),
-                    float(w["Homerseklet_C"]) if w else None,
-                    float(w["Szelsebesseg_kmh"]) if w else None,
-                    float(w["Napsugarzas_W_m2"]) if w else None,
-                    float(w["Csapadek_mm"]) if w else None,
-                    float(dam_oras[t]) if t in dam_oras else None,
-                    int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
-                    _anomalia_kategoria(t, r, w if w else None, ido_map),
-                ))
-            with _db_connect() as conn:
-                with conn.cursor() as cur:
-                    for r in rows:
-                        cur.execute(sql, r)
-            print(f"[INFO] backfill {nap}: {len(rows)} ora mentve "
-                  f"(kuszob={kuszob:.1f})", flush=True)
-        except Exception as e:
-            print(f"[HIBA] backfill STL {nap}: {type(e).__name__}: {e}", flush=True)
-
-
 C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a2d42',
      'txt':'#cbd5e1','mut':'#64748b','or':'#FF6600','gr':'#10b981','bl':'#0066CC',
      'rd':'#ef4444','yw':'#f59e0b','cy':'#4b9cd3','wh':'#f1f5f9'}
@@ -1632,14 +1543,10 @@ def fetch(n,_manual):
                 "anomalia_db":int(mask.sum()),
                 "stat":{"std":std,"mean":mean,"kuszob":kuszob,
                     "irany":"emelkedő" if res.trend.iloc[-1]>res.trend.iloc[-24] else "csökkenő"}}
-            try:
-                _ido_map = ({r["Datum"]: r for r in ido_df.to_dict("records")}
-                            if ido_ok else {})
-                _dam = dam_oras if dam_ok else {}
-                save_stl_anomalies(s, res, kuszob, mean, _ido_map, _dam)
-                backfill_missing_stl_days(load, _ido_map, _dam, napok=3)
-            except Exception as _se:
-                print(f"[HIBA] stl_anomalia mentes/backfill: {_se}", flush=True)
+            if ido_ok and dam_ok:
+                save_stl_anomalies(s, res, kuszob, mean,
+                    {r["Datum"]: r for r in ido_df.to_dict("records")},
+                    dam_oras)
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
