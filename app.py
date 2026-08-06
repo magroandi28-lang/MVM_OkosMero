@@ -1541,7 +1541,7 @@ def fetch(n,_manual):
             s = load.tail(720) if len(load)>=720 else load
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
-            mean, kuszob = mad_kuszob(res.resid, szorzo=3.0)
+            mean, kuszob = mad_kuszob(res.resid, szorzo=2.5)
             std = float(res.resid.std())
             mask = abs(res.resid - mean) > kuszob
             # A négy idősor 0,1 MWh-ra kerekítve megy a böngészőbe. Teljes
