@@ -793,7 +793,10 @@ def get_load():
         e = pd.Timestamp(_helyi_most(),tz="Europe/Budapest") + pd.Timedelta(hours=1)
         load = c.query_load("HU",start=s,end=e)
         if isinstance(load,pd.DataFrame): load = load.iloc[:,0]
-        load = load.resample('h').mean().dropna()
+        
+        # JAVÍTÁS: dropna() helyett órás rácsra illesztés és hiányzó adatok interpolálása
+        load = load.resample('h').mean().interpolate(method='linear').ffill().bfill()
+        
         load = _helyi(load)
         if len(load) < 15*24:
             print(f"[HIBA] ENTSO-E (fogyasztás): kevés adat ({len(load)} óra)", flush=True)
