@@ -407,172 +407,61 @@ def get_validacio_adatok():
                           "homerseklet": float(r[2]) if r[2] is not None else None,
                           "kategoria": r[3]}
                          for r in cur.fetchall()]
-
-                # ---- Teljes STL diagnosztika: NEM csak az anomáliák ----
-                # Ez a Modell Labor hiteles forrása. Így azok a napok is
-                # látszanak, amikor egyetlen óra sem lépte át a küszöböt.
-                cur.execute("""
-                    select target_time at time zone 'Europe/Budapest',
-                           actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
-                           is_anomaly, kategoria, homerseklet_c,
-                           calculation_status, source_type
-                    from public.stl_diagnostics
-                    where target_time >= now() - interval '7 days'
-                      and calculation_status = 'complete'
-                    order by target_time asc
-                """)
-                diagnosztika = [{
-                    "ido": r[0].isoformat(),
-                    "actual": float(r[1]) if r[1] is not None else None,
-                    "expected": float(r[2]) if r[2] is not None else None,
-                    "residual": float(r[3]) if r[3] is not None else None,
-                    "threshold": float(r[4]) if r[4] is not None else None,
-                    "is_anomaly": bool(r[5]) if r[5] is not None else False,
-                    "kategoria": r[6],
-                    "homerseklet": float(r[7]) if r[7] is not None else None,
-                    "status": r[8],
-                    "source_type": r[9],
-                } for r in cur.fetchall()]
         return {"napok": napok, "osszes": osszes, "kategoriak": kat, "het": het,
-                "naplo": naplo, "diagnosztika": diagnosztika}
+                "naplo": naplo}
     except Exception as e:
         print(f"[HIBA] validacios adatok: {type(e).__name__}: {e}", flush=True)
         return None
 
-def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map=None, dam_oras=None):
-    """STL-diagnosztika mentése minden lezárt órához.
+def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map, dam_oras):
+    """STL-anomáliák mentése teljes kontextussal (fogyasztás + időjárás + ár).
 
-    Fontos szabályok:
-    - a már complete történeti diagnosztikát nem írjuk felül;
-    - a needs_recompute és új órák kapnak számított értéket;
-    - a régi anomália-események érintetlenek maradnak;
-    - új anomália-eseményt csak a legfrissebb lezárt óra hozhat létre;
-    - időjárás/DAM hiánya nem blokkolja az alap STL-mentést.
-    """
+    Csak a küszöböt átlépő órák kerülnek be. Az időjárás/ár oszlopok
+    None-ok maradnak, ha az adott óra kívül esik a lekért ablakon —
+    a friss anomáliáknál mindig lesz kontextus."""
     if not _db_available():
         return
-
-    ido_map = ido_map or {}
-    dam_oras = dam_oras or {}
     resid = stl_res.resid
-
-    if len(resid) == 0:
+    mask = abs(resid - atlag) > kuszob
+    if not mask.any():
         return
 
-    mask = abs(resid - atlag) > kuszob
-    latest_t = resid.index.max()
-    algorithm_version = "stl24-seasonal25-robust-2.5std-v1"
-
-    diag_sql = """
-        insert into public.stl_diagnostics (
-            target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
-            is_anomaly, kategoria, homerseklet_c, szelsebesseg_kmh,
-            napsugarzas_w_m2, csapadek_mm, dam_eur_mwh,
-            calculation_status, source_type, algorithm_version,
-            calculated_at, updated_at
-        ) values (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            'complete',%s,%s,now(),now()
-        )
-        on conflict (target_time) do update set
-            actual_mwh = excluded.actual_mwh,
-            expected_mwh = excluded.expected_mwh,
-            residual_mwh = excluded.residual_mwh,
-            threshold_mwh = excluded.threshold_mwh,
-            is_anomaly = excluded.is_anomaly,
-            kategoria = excluded.kategoria,
-            homerseklet_c = coalesce(
-                excluded.homerseklet_c, public.stl_diagnostics.homerseklet_c),
-            szelsebesseg_kmh = coalesce(
-                excluded.szelsebesseg_kmh, public.stl_diagnostics.szelsebesseg_kmh),
-            napsugarzas_w_m2 = coalesce(
-                excluded.napsugarzas_w_m2, public.stl_diagnostics.napsugarzas_w_m2),
-            csapadek_mm = coalesce(
-                excluded.csapadek_mm, public.stl_diagnostics.csapadek_mm),
-            dam_eur_mwh = coalesce(
-                excluded.dam_eur_mwh, public.stl_diagnostics.dam_eur_mwh),
-            calculation_status = 'complete',
-            source_type = excluded.source_type,
-            algorithm_version = excluded.algorithm_version,
-            calculated_at = now(),
-            updated_at = now()
-        where public.stl_diagnostics.calculation_status <> 'complete'
-    """
-
-    anomaly_sql = """
+    sql = """
         insert into public.stl_anomalia (
             target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
             homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
             dam_eur_mwh, ora, hetvege, unnepnap, kategoria
         ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        on conflict (target_time) do nothing
+        on conflict (target_time) do update set
+            kategoria = coalesce(excluded.kategoria, public.stl_anomalia.kategoria),
+            residual_mwh = excluded.residual_mwh,
+            expected_mwh = excluded.expected_mwh,
+            threshold_mwh = excluded.threshold_mwh
     """
-
+    rows = []
+    for t in resid.index[mask]:
+        w = ido_map.get(t) or {}
+        tny = float(load_series.loc[t])
+        r = float(resid.loc[t])
+        rows.append((
+            _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
+            tny, tny - r, r, float(kuszob),
+            float(w["Homerseklet_C"]) if w else None,
+            float(w["Szelsebesseg_kmh"]) if w else None,
+            float(w["Napsugarzas_W_m2"]) if w else None,
+            float(w["Csapadek_mm"]) if w else None,
+            float(dam_oras[t]) if t in dam_oras else None,
+            int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
+            _anomalia_kategoria(t, r, w if w else None, ido_map),
+        ))
     try:
-        mentett = 0
         with _db_connect() as conn:
             with conn.cursor() as cur:
-                for t in resid.index:
-                    w = ido_map.get(t) or {}
-                    tny = float(load_series.loc[t])
-                    r = float(resid.loc[t])
-                    is_anomaly = bool(mask.loc[t])
-                    kategoria = (
-                        _anomalia_kategoria(t, r, w if w else None, ido_map)
-                        if is_anomaly else None
-                    )
-
-                    target_utc = _aware_budapest(t).tz_convert("UTC").to_pydatetime()
-                    source_type = (
-                        "live_stl_pipeline" if t == latest_t
-                        else "backfill_current_window"
-                    )
-
-                    cur.execute(diag_sql, (
-                        target_utc,
-                        tny,
-                        tny - r,
-                        r,
-                        float(kuszob),
-                        is_anomaly,
-                        kategoria,
-                        float(w["Homerseklet_C"]) if w else None,
-                        float(w["Szelsebesseg_kmh"]) if w else None,
-                        float(w["Napsugarzas_W_m2"]) if w else None,
-                        float(w["Csapadek_mm"]) if w else None,
-                        float(dam_oras[t]) if t in dam_oras else None,
-                        source_type,
-                        algorithm_version,
-                    ))
-                    if cur.rowcount > 0:
-                        mentett += 1
-
-                    # Csak a legfrissebb lezárt óra hozhat létre ÚJ eseményt.
-                    if t == latest_t and is_anomaly:
-                        cur.execute(anomaly_sql, (
-                            target_utc,
-                            tny,
-                            tny - r,
-                            r,
-                            float(kuszob),
-                            float(w["Homerseklet_C"]) if w else None,
-                            float(w["Szelsebesseg_kmh"]) if w else None,
-                            float(w["Napsugarzas_W_m2"]) if w else None,
-                            float(w["Csapadek_mm"]) if w else None,
-                            float(dam_oras[t]) if t in dam_oras else None,
-                            int(t.hour),
-                            bool(t.weekday() >= 5),
-                            bool(t.date() in hu_holidays),
-                            kategoria,
-                        ))
-
-        print(
-            f"[INFO] stl_diagnostics: {mentett} uj/ujraszamolt ora; "
-            f"legfrissebb lezart ora: {latest_t}",
-            flush=True,
-        )
+                for r in rows:
+                    cur.execute(sql, r)
+        print(f"[INFO] stl_anomalia: {len(rows)} ora mentve/frissitve", flush=True)
     except Exception as e:
-        print(f"[HIBA] STL diagnosztika mentes: {type(e).__name__}: {e}", flush=True)
+        print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
 
 
 C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a2d42',
@@ -1638,10 +1527,7 @@ def fetch(n,_manual):
         try:
             # A get_load 17 napot hoz, tehát a 720 órás ablak sosem telik meg.
             # A felirat a TÉNYLEGES hosszt mutassa, ne egy remélt 30 napot.
-            # Csak teljesen lezárt órák kerülnek az STL-be.
-            completed_cutoff = pd.Timestamp(most).floor("h") - pd.Timedelta(hours=1)
-            load_completed = load[load.index <= completed_cutoff]
-            s = load_completed.tail(720) if len(load_completed)>=720 else load_completed
+            s = load.tail(720) if len(load)>=720 else load
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
             std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
@@ -1657,12 +1543,10 @@ def fetch(n,_manual):
                 "anomalia_db":int(mask.sum()),
                 "stat":{"std":std,"mean":mean,"kuszob":kuszob,
                     "irany":"emelkedő" if res.trend.iloc[-1]>res.trend.iloc[-24] else "csökkenő"}}
-            save_stl_anomalies(
-                s, res, kuszob, mean,
-                ({r["Datum"]: r for r in ido_df.to_dict("records")}
-                 if ido_ok else {}),
-                dam_oras if dam_ok else {},
-            )
+            if ido_ok and dam_ok:
+                save_stl_anomalies(s, res, kuszob, mean,
+                    {r["Datum"]: r for r in ido_df.to_dict("records")},
+                    dam_oras)
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
@@ -2818,92 +2702,133 @@ def _ts_naiv(iso):
     return t.replace(tzinfo=None) if t.tzinfo else t
 
 
-def _reziduum_panel(stl, naplo, diagnosztika=None):
-    """A tárolt óránkénti STL-diagnosztika az utolsó 7 napra.
-
-    Elsődleges forrás: public.stl_diagnostics. Ez minden vizsgált órát
-    tartalmaz, ezért a nulla anomáliás napok sem tűnnek el.
-    """
-    diag = [r for r in (diagnosztika or [])
-            if r.get("residual") is not None and r.get("threshold") is not None]
-
-    if not diag:
+def _reziduum_panel(stl, naplo):
+    """Az STL reziduuma az utolsó 7 napon, ±2,5σ küszöbbel. A küszöböt
+    átlépő órák a kategóriájuk színét kapják — így a grafikon és a napló
+    ugyanazt a nyelvet beszéli."""
+    if not stl or not stl.get("idok"):
         return hianyzo_panel("REZIDUUM ÉS ANOMÁLIÁK",
-            "A teljes STL-diagnosztika még nem érhető el.")
+            "Kevés élő mérési adat az elemzéshez.")
+    idok = [datetime.fromisoformat(t) for t in stl["idok"]]
+    resid = [float(x) for x in stl["residual"]]
+    n7 = 7 * 24
+    idok = idok[-n7:]; resid = resid[-n7:]
+    stat = stl["stat"]; kuszob = float(stat["kuszob"]); atlag = float(stat["mean"])
 
-    idok = [datetime.fromisoformat(r["ido"]) for r in diag]
-    resid = [float(r["residual"]) for r in diag]
-    felso = [float(r["threshold"]) for r in diag]
-    also = [-float(r["threshold"]) for r in diag]
+    # A naplóban szereplő órák — időbélyeg szerint. A napló a FELISMERÉS
+    # pillanatában mért reziduumot is tárolja; ez a hiteles érték, mert az
+    # akkori küszöbhöz mérve lépte át a határt.
+    naplo_map = {}
+    for r in (naplo or []):
+        t_ = _ts_naiv(r.get("ido"))
+        if t_ is not None:
+            naplo_map[t_] = r
 
+    # A VONAL is a felismeréskori értéket veszi át azokban az órákban, amelyek
+    # a naplóban szerepelnek.
+    #
+    # Enélkül a grafikonon két különböző sorozat keveredett: a kék vonal a MAI
+    # újraszámolás, a pontok a TÁROLT érték — így a pontok a levegőben lógtak,
+    # jóval a vonal fölött. Egy sorozatot mutatunk: ahol a rendszer annak idején
+    # rögzítette a maradékot, ott az a hiteles érték; a többi órán a mostani
+    # számítás adja a kontextust. Így a kiugrások a vonalon is látszanak, a
+    # pontok rajta ülnek, és mind átlépi a küszöböt.
+    for i, t_ in enumerate(idok):
+        r = naplo_map.get(t_)
+        if not r:
+            continue
+        try:
+            resid[i] = float(r["residual"])
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    fig = go.Figure()
+    fig.add_hline(y=atlag + kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
+    fig.add_hline(y=atlag - kuszob, line=dict(color=C['rd'], width=1, dash="dash"))
+    fig.add_annotation(x=idok[0], y=atlag + kuszob, text="+2,5σ", showarrow=False,
+        yanchor="bottom", xanchor="left", font=dict(size=9, color=C['rd']))
+    fig.add_annotation(x=idok[0], y=atlag - kuszob, text="−2,5σ", showarrow=False,
+        yanchor="top", xanchor="left", font=dict(size=9, color=C['rd']))
+    # A buborék szövegét PYTHONBAN állítjuk elő, és a sablon csak kiírja.
+    #
+    # A `%{y:+,.0f}` formátum elvileg helyes, a gyakorlatban mégis nyers
+    # lebegőpontos érték jelent meg (-479.500305202605). A böngészőoldali
+    # számformázásra nem érdemes hagyatkozni, ha egy `f-string` ugyanezt
+    # biztosan megoldja: itt már nincs mit félreértelmezni.
     def _mwh(v):
         return f"{v:+,.0f} MWh".replace(",", " ")
 
-    fig = go.Figure()
-
-    # Óránként változó küszöb: nem egyetlen mai 2,5σ vonalat vetítünk vissza
-    # a teljes hétre, hanem azt mutatjuk, amit az adatbázis az adott órához tárol.
-    fig.add_trace(go.Scatter(
-        x=idok, y=felso, mode="lines",
-        line=dict(color=C['rd'], width=1, dash="dash"),
-        hovertemplate="%{x|%m.%d. %H:%M}<br>+küszöb: %{y:,.0f} MWh<extra></extra>",
-        name="+2,5σ"))
-    fig.add_trace(go.Scatter(
-        x=idok, y=also, mode="lines",
-        line=dict(color=C['rd'], width=1, dash="dash"),
-        hovertemplate="%{x|%m.%d. %H:%M}<br>−küszöb: %{customdata}<extra></extra>",
-        customdata=[f"{abs(v):,.0f} MWh".replace(",", " ") for v in also],
-        name="−2,5σ"))
-
-    fig.add_trace(go.Scatter(
-        x=idok, y=resid, mode="lines",
+    fig.add_trace(go.Scatter(x=idok, y=resid, mode="lines",
         line=dict(color="#4b9cd3", width=1.5),
         customdata=[_mwh(v) for v in resid],
         hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}<extra>reziduum</extra>",
-        name="Reziduum"))
+        showlegend=False))
 
-    # A színes pontok kizárólag az adatbázisban is_anomaly=true órák.
+    # A pontok a NAPLÓBÓL jönnek, nem újraszámolt küszöbpróbából.
+    #
+    # Korábban a grafikon maga döntötte el, mi számít anomáliának: minden
+    # betöltéskor újrafuttatta az `|reziduum - átlag| > küszöb` próbát a FRISSEN
+    # számolt STL-en. Csakhogy az STL gördülő felbontás — ahogy új órák
+    # érkeznek, a trend és a napi ritmus újraillesztődik, és ugyanannak az
+    # órának megváltozik a maradéka. Emiatt a naplóban szereplő, egyszer már
+    # felismert órák a grafikonról eltűntek (velük a jelmagyarázat is), és a
+    # két nézet ellentmondott egymásnak — pedig a panel alcíme épp azt ígéri,
+    # hogy ugyanazt a nyelvet beszélik.
+    #
+    # Mostantól a napló a hiteles forrás: azokat az órákat jelöljük, amelyeket
+    # a rendszer annak idején — az AKKORI küszöbhöz mérve — anomáliának ismert
+    # fel, és a felismeréskor mért reziduummal rajzoljuk ki őket.
+    # A pont a FELISMERÉSKOR mért reziduumon ül — ezt az értéket NEM számoljuk
+    # újra.
+    #
+    # Az STL gördülő felbontás: minden oldalbetöltéskor újrailleszti a trendet
+    # és a napi ritmust a legutóbbi ~408 órára. Egy óra maradéka ettől
+    # megváltozik — ami tegnap este -730 MWh volt, ma ugyanarra az órára +300.
+    # Emiatt a korábban felismert anomáliák előbb eltűntek a grafikonról, majd
+    # amikor a mai görbére tettem őket, a küszöbön BELÜLRE kerültek, holott az
+    # alcím azt ígéri, hogy átlépik. Mindkettő félrevezető volt.
+    #
+    # Ami egy adott napon anomália volt, az anomália is marad: a napló őrzi az
+    # akkor mért értéket, és a grafikon ezt mutatja. Így a hét kiugrásai
+    # együtt, változatlanul látszanak.
+    # A pontok ugyanabból a sorozatból jönnek, amit a vonal is rajzol — így
+    # nem tudnak elcsúszni egymástól.
+    resid_map = dict(zip(idok, resid))
     csoportok = {}
-    for r, t_, y_ in zip(diag, idok, resid):
-        if not r.get("is_anomaly"):
+    for t_ in idok:
+        r = naplo_map.get(t_)
+        if not r:
             continue
         kat = r.get("kategoria")
         cs = csoportok.setdefault(kat, {"x": [], "y": [], "txt": []})
-        cs["x"].append(t_)
-        cs["y"].append(y_)
-        cs["txt"].append(_mwh(y_))
-
+        cs["x"].append(t_); cs["y"].append(resid_map[t_])
+        cs["txt"].append(_mwh(resid_map[t_]))
     for kat, pontok in csoportok.items():
         szin = KAT_SZIN.get(kat, "#94a3b8")
-        nev = KAT_NEV.get(kat, "Besorolatlan anomália")
-        fig.add_trace(go.Scatter(
-            x=pontok["x"], y=pontok["y"], mode="markers",
-            name=nev,
-            marker=dict(size=8, color=szin,
-                        line=dict(width=1, color="rgba(255,255,255,.6)")),
+        nev = KAT_NEV.get(kat, "besorolás előtti")
+        fig.add_trace(go.Scatter(x=pontok["x"], y=pontok["y"], mode="markers",
+            name=nev, marker=dict(size=8, color=szin,
+                line=dict(width=1, color="rgba(255,255,255,.6)")),
             customdata=pontok["txt"],
-            hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}<extra>" + nev + "</extra>"
-        ))
+            hovertemplate="%{x|%m.%d. %H:%M}<br>%{customdata}"
+                          "<extra>" + nev + "</extra>"))
 
-    fig.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         font=dict(color=C['mut'], family='Inter,sans-serif', size=10),
         margin=dict(l=48, r=16, t=8, b=26), height=290,
         legend=dict(orientation="h", yanchor="top", y=-0.18,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=10, color=C['txt'])),
+            bgcolor="rgba(0,0,0,0)", font=dict(size=10, color=C['txt'])),
         xaxis=dict(type="date", gridcolor="#101f35", color=C['mut'],
-                   tickformat="%m.%d", fixedrange=True),
+            tickformat="%m.%d", fixedrange=True),
         yaxis=dict(title="MWh", gridcolor="#101f35", color=C['mut'],
-                   zeroline=False, fixedrange=True, hoverformat="+,.0f")
-    )
+            zeroline=False, fixedrange=True, hoverformat="+,.0f"))
 
-    anom_db = sum(1 for r in diag if r.get("is_anomaly"))
     return html.Div([
         html.Div("REZIDUUM ÉS ANOMÁLIÁK — UTOLSÓ 7 NAP",
             style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
-        html.Div(
-            f"Tárolt óránkénti STL-diagnosztika · {len(diag)} vizsgált óra · "
-            f"{anom_db} küszöbátlépés · a piros szaggatott vonal az adott óra saját küszöbe",
+        html.Div("Mért fogyasztás mínusz trend és napi ritmus · a színes pontok a "
+                 "±2,5σ küszöböt átlépő, osztályozott órák a felismerés napján "
+                 "mért értékükkel",
             style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 8px"}),
         dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height":"320px"})
     ], style=CS)
@@ -2953,110 +2878,6 @@ def _anomalia_naplo_panel(naplo):
         sorok.append(html.Div(f"… és további {len(naplo)-9} eset a 7 napból",
             style={"fontSize":"10px","color":C['mut'],"marginTop":"6px"}))
     return html.Div([*cim, *sorok], style=CS)
-
-
-STL_NAPLO_PAGE_SIZE = 12
-
-def _stl_naplo_sorok(diagnosztika, page=1):
-    """Egy lapnyi teljes STL napló, legfrissebb órával kezdve."""
-    diag = list(reversed(diagnosztika or []))
-    page = max(1, int(page or 1))
-    start = (page - 1) * STL_NAPLO_PAGE_SIZE
-    rows = diag[start:start + STL_NAPLO_PAGE_SIZE]
-
-    if not rows:
-        return [html.Div("Nincs megjeleníthető STL-diagnosztika.",
-            style={"fontSize":"11px","color":C['mut']})]
-
-    sorok = []
-    for r in rows:
-        dt = datetime.fromisoformat(r["ido"])
-        is_anomaly = bool(r.get("is_anomaly"))
-        kat = r.get("kategoria")
-
-        if is_anomaly:
-            szin = KAT_SZIN.get(kat, C['or'])
-            nev = KAT_NEV.get(kat, "Anomália")
-            ikon_txt = "!"
-        else:
-            szin = C['gr']
-            nev = "Normál"
-            ikon_txt = "✓"
-
-        residual = r.get("residual")
-        threshold = r.get("threshold")
-        residual_txt = (
-            f"{float(residual):+,.0f} MWh".replace(",", " ")
-            if residual is not None else "–"
-        )
-        threshold_txt = (
-            f"küszöb ±{float(threshold):,.0f} MWh".replace(",", " ")
-            if threshold is not None else "küszöb –"
-        )
-        ho = (f"{float(r['homerseklet']):.0f} °C · "
-              if r.get("homerseklet") is not None else "")
-
-        sorok.append(html.Div([
-            html.Div(ikon_txt, style={
-                "width":"30px","height":"30px","borderRadius":"50%",
-                "display":"flex","alignItems":"center","justifyContent":"center",
-                "flex":"0 0 auto","fontWeight":"700","fontSize":"13px",
-                "color":szin,"background":_rgba(szin,.10),
-                "border":f"1px solid {_rgba(szin,.35)}"}),
-            html.Div([
-                html.Div([
-                    html.Span(f"{dt:%m.%d}. {HETNAP[dt.weekday()]} {dt:%H:%M}",
-                              style={"color":C['wh']}),
-                    html.Span(f" · {residual_txt}",
-                              style={"color":szin,"fontWeight":"600"})
-                ], style={"fontSize":"11px"}),
-                html.Div(f"{ho}{nev} · {threshold_txt}",
-                         style={"fontSize":"9px","color":C['mut'],"marginTop":"2px"})
-            ], style={"flex":"1","minWidth":"0"}),
-        ], style={
-            "display":"flex","alignItems":"center","gap":"9px",
-            "background":C['card2'],"borderLeft":f"3px solid {szin}",
-            "borderRadius":"8px","padding":"7px 9px","marginBottom":"5px"
-        }))
-    return sorok
-
-
-def _stl_naplo_panel(diagnosztika):
-    diag = diagnosztika or []
-    max_page = max(1, math.ceil(len(diag) / STL_NAPLO_PAGE_SIZE))
-    return html.Div([
-        html.Div("STL NAPLÓ",
-            style={"fontSize":"13px","fontWeight":"700","color":C['wh']}),
-        html.Div(
-            f"Utolsó 7 nap · minden vizsgált óra · {len(diag)} rekord · "
-            f"{sum(1 for r in diag if r.get('is_anomaly'))} anomália",
-            style={"fontSize":"11px","color":"#94a3b8","margin":"3px 0 10px"}),
-        html.Div(
-            _stl_naplo_sorok(diag, 1),
-            id="stl-naplo-lista"
-        ),
-        dbc.Pagination(
-            id="stl-naplo-page",
-            active_page=1,
-            max_value=max_page,
-            first_last=True,
-            previous_next=True,
-            fully_expanded=False,
-            size="sm",
-            className="mt-2",
-        ) if max_page > 1 else html.Div()
-    ], style=CS)
-
-
-@callback(
-    Output("stl-naplo-lista", "children"),
-    Input("stl-naplo-page", "active_page"),
-    State("adatok", "data"),
-    prevent_initial_call=True
-)
-def stl_naplo_lapozas(active_page, data):
-    diag = (((data or {}).get("validacio") or {}).get("diagnosztika")) or []
-    return _stl_naplo_sorok(diag, active_page or 1)
 
 
 def _stl_ador_nagy(naplo, kategoriak):
@@ -3281,13 +3102,12 @@ def megujulok(data):
 def mllabor(data):
     v = data.get("validacio") or {}
     naplo = v.get("naplo") or []
-    diagnosztika = v.get("diagnosztika") or []
     return html.Div([
         html.Div("Gépi Tanulás Modell Labor", style={"fontSize":"16px",
             "fontWeight":"600","color":C['wh'],"marginBottom":"14px"}),
         dbc.Row([
-            dbc.Col(_reziduum_panel(data.get("stl"), naplo, diagnosztika), lg=8, md=12),
-            dbc.Col(_stl_naplo_panel(diagnosztika), lg=4, md=12),
+            dbc.Col(_reziduum_panel(data.get("stl"), naplo), lg=8, md=12),
+            dbc.Col(_anomalia_naplo_panel(naplo), lg=4, md=12),
         ], className="g-3 mb-3"),
         dbc.Row([
             dbc.Col(_stl_ador_nagy(naplo, v.get("kategoriak")), md=12)
