@@ -1528,9 +1528,8 @@ def fetch(n,_manual):
     stl_napok = 0
     if load_ok:
         try:
-            # A get_load 17 napot hoz, tehát a 720 órás ablak sosem telik meg.
-            # A felirat a TÉNYLEGES hosszt mutassa, ne egy remélt 30 napot.
             s = load.tail(720) if len(load)>=720 else load
+            s = s.resample('h').mean().interpolate(method='linear').ffill().bfill()
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
             std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
