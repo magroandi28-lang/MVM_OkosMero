@@ -413,55 +413,140 @@ def get_validacio_adatok():
         print(f"[HIBA] validacios adatok: {type(e).__name__}: {e}", flush=True)
         return None
 
-def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map, dam_oras):
-    """STL-anomáliák mentése teljes kontextussal (fogyasztás + időjárás + ár).
+def save_stl_anomalies(load_series, stl_res, kuszob, atlag, ido_map=None, dam_oras=None):
+    """STL-diagnosztika mentése minden lezárt órához.
 
-    Csak a küszöböt átlépő órák kerülnek be. Az időjárás/ár oszlopok
-    None-ok maradnak, ha az adott óra kívül esik a lekért ablakon —
-    a friss anomáliáknál mindig lesz kontextus."""
+    Fontos szabályok:
+    - a már complete történeti diagnosztikát nem írjuk felül;
+    - a needs_recompute és új órák kapnak számított értéket;
+    - a régi anomália-események érintetlenek maradnak;
+    - új anomália-eseményt csak a legfrissebb lezárt óra hozhat létre;
+    - időjárás/DAM hiánya nem blokkolja az alap STL-mentést.
+    """
     if not _db_available():
         return
+
+    ido_map = ido_map or {}
+    dam_oras = dam_oras or {}
     resid = stl_res.resid
-    mask = abs(resid - atlag) > kuszob
-    if not mask.any():
+
+    if len(resid) == 0:
         return
 
-    sql = """
+    mask = abs(resid - atlag) > kuszob
+    latest_t = resid.index.max()
+    algorithm_version = "stl24-seasonal25-robust-2.5std-v1"
+
+    diag_sql = """
+        insert into public.stl_diagnostics (
+            target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
+            is_anomaly, kategoria, homerseklet_c, szelsebesseg_kmh,
+            napsugarzas_w_m2, csapadek_mm, dam_eur_mwh,
+            calculation_status, source_type, algorithm_version,
+            calculated_at, updated_at
+        ) values (
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            'complete',%s,%s,now(),now()
+        )
+        on conflict (target_time) do update set
+            actual_mwh = excluded.actual_mwh,
+            expected_mwh = excluded.expected_mwh,
+            residual_mwh = excluded.residual_mwh,
+            threshold_mwh = excluded.threshold_mwh,
+            is_anomaly = excluded.is_anomaly,
+            kategoria = excluded.kategoria,
+            homerseklet_c = coalesce(
+                excluded.homerseklet_c, public.stl_diagnostics.homerseklet_c),
+            szelsebesseg_kmh = coalesce(
+                excluded.szelsebesseg_kmh, public.stl_diagnostics.szelsebesseg_kmh),
+            napsugarzas_w_m2 = coalesce(
+                excluded.napsugarzas_w_m2, public.stl_diagnostics.napsugarzas_w_m2),
+            csapadek_mm = coalesce(
+                excluded.csapadek_mm, public.stl_diagnostics.csapadek_mm),
+            dam_eur_mwh = coalesce(
+                excluded.dam_eur_mwh, public.stl_diagnostics.dam_eur_mwh),
+            calculation_status = 'complete',
+            source_type = excluded.source_type,
+            algorithm_version = excluded.algorithm_version,
+            calculated_at = now(),
+            updated_at = now()
+        where public.stl_diagnostics.calculation_status <> 'complete'
+    """
+
+    anomaly_sql = """
         insert into public.stl_anomalia (
             target_time, actual_mwh, expected_mwh, residual_mwh, threshold_mwh,
             homerseklet_c, szelsebesseg_kmh, napsugarzas_w_m2, csapadek_mm,
             dam_eur_mwh, ora, hetvege, unnepnap, kategoria
         ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        on conflict (target_time) do update set
-            kategoria = coalesce(excluded.kategoria, public.stl_anomalia.kategoria),
-            residual_mwh = excluded.residual_mwh,
-            expected_mwh = excluded.expected_mwh,
-            threshold_mwh = excluded.threshold_mwh
+        on conflict (target_time) do nothing
     """
-    rows = []
-    for t in resid.index[mask]:
-        w = ido_map.get(t) or {}
-        tny = float(load_series.loc[t])
-        r = float(resid.loc[t])
-        rows.append((
-            _aware_budapest(t).tz_convert("UTC").to_pydatetime(),
-            tny, tny - r, r, float(kuszob),
-            float(w["Homerseklet_C"]) if w else None,
-            float(w["Szelsebesseg_kmh"]) if w else None,
-            float(w["Napsugarzas_W_m2"]) if w else None,
-            float(w["Csapadek_mm"]) if w else None,
-            float(dam_oras[t]) if t in dam_oras else None,
-            int(t.hour), t.weekday() >= 5, t.date() in hu_holidays,
-            _anomalia_kategoria(t, r, w if w else None, ido_map),
-        ))
+
     try:
+        mentett = 0
         with _db_connect() as conn:
             with conn.cursor() as cur:
-                for r in rows:
-                    cur.execute(sql, r)
-        print(f"[INFO] stl_anomalia: {len(rows)} ora mentve/frissitve", flush=True)
+                for t in resid.index:
+                    w = ido_map.get(t) or {}
+                    tny = float(load_series.loc[t])
+                    r = float(resid.loc[t])
+                    is_anomaly = bool(mask.loc[t])
+                    kategoria = (
+                        _anomalia_kategoria(t, r, w if w else None, ido_map)
+                        if is_anomaly else None
+                    )
+
+                    target_utc = _aware_budapest(t).tz_convert("UTC").to_pydatetime()
+                    source_type = (
+                        "live_stl_pipeline" if t == latest_t
+                        else "backfill_current_window"
+                    )
+
+                    cur.execute(diag_sql, (
+                        target_utc,
+                        tny,
+                        tny - r,
+                        r,
+                        float(kuszob),
+                        is_anomaly,
+                        kategoria,
+                        float(w["Homerseklet_C"]) if w else None,
+                        float(w["Szelsebesseg_kmh"]) if w else None,
+                        float(w["Napsugarzas_W_m2"]) if w else None,
+                        float(w["Csapadek_mm"]) if w else None,
+                        float(dam_oras[t]) if t in dam_oras else None,
+                        source_type,
+                        algorithm_version,
+                    ))
+                    if cur.rowcount > 0:
+                        mentett += 1
+
+                    # Csak a legfrissebb lezárt óra hozhat létre ÚJ eseményt.
+                    if t == latest_t and is_anomaly:
+                        cur.execute(anomaly_sql, (
+                            target_utc,
+                            tny,
+                            tny - r,
+                            r,
+                            float(kuszob),
+                            float(w["Homerseklet_C"]) if w else None,
+                            float(w["Szelsebesseg_kmh"]) if w else None,
+                            float(w["Napsugarzas_W_m2"]) if w else None,
+                            float(w["Csapadek_mm"]) if w else None,
+                            float(dam_oras[t]) if t in dam_oras else None,
+                            int(t.hour),
+                            bool(t.weekday() >= 5),
+                            bool(t.date() in hu_holidays),
+                            kategoria,
+                        ))
+
+        print(
+            f"[INFO] stl_diagnostics: {mentett} uj/ujraszamolt ora; "
+            f"legfrissebb lezart ora: {latest_t}",
+            flush=True,
+        )
     except Exception as e:
-        print(f"[HIBA] stl_anomalia mentes: {type(e).__name__}: {e}", flush=True)
+        print(f"[HIBA] STL diagnosztika mentes: {type(e).__name__}: {e}", flush=True)
 
 
 C = {'bg':'#050d1a','sb':'#070f1e','card':'#0a1628','card2':'#0f1923','brd':'#1a2d42',
@@ -1527,7 +1612,10 @@ def fetch(n,_manual):
         try:
             # A get_load 17 napot hoz, tehát a 720 órás ablak sosem telik meg.
             # A felirat a TÉNYLEGES hosszt mutassa, ne egy remélt 30 napot.
-            s = load.tail(720) if len(load)>=720 else load
+            # Csak teljesen lezárt órák kerülnek az STL-be.
+            completed_cutoff = pd.Timestamp(most).floor("h") - pd.Timedelta(hours=1)
+            load_completed = load[load.index <= completed_cutoff]
+            s = load_completed.tail(720) if len(load_completed)>=720 else load_completed
             stl_napok = max(1, round(len(s)/24))
             res = STL(s,period=24,seasonal=25,robust=True).fit()
             std=float(res.resid.std()); mean=float(res.resid.mean()); kuszob=2.5*std
@@ -1543,10 +1631,12 @@ def fetch(n,_manual):
                 "anomalia_db":int(mask.sum()),
                 "stat":{"std":std,"mean":mean,"kuszob":kuszob,
                     "irany":"emelkedő" if res.trend.iloc[-1]>res.trend.iloc[-24] else "csökkenő"}}
-            if ido_ok and dam_ok:
-                save_stl_anomalies(s, res, kuszob, mean,
-                    {r["Datum"]: r for r in ido_df.to_dict("records")},
-                    dam_oras)
+            save_stl_anomalies(
+                s, res, kuszob, mean,
+                ({r["Datum"]: r for r in ido_df.to_dict("records")}
+                 if ido_ok else {}),
+                dam_oras if dam_ok else {},
+            )
         except Exception as e:
             print(f"[HIBA] STL: {e}", flush=True)
 
