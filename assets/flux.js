@@ -249,3 +249,4 @@
               " | gépelés " + KARAKTER_MS + " ms/karakter");
   requestAnimationFrame(hurok);
 })();
+
