@@ -1676,3 +1676,70 @@ body {
   }
 }
 
+
+/* ============================================================
+   HU / EN KAPCSOLÓ — a Flux-vonal mellett
+
+   Miért kapcsoló és nem automatikus felismerés?
+
+   A felismerés önmagában zavaros lett volna: egy angol kérdés után a
+   körbejáró szöveg visszaesett volna magyarra, és a látogató nem értené,
+   mi történt. Ha a nyelv ÁLLAPOT, akkor minden együtt vált — a körhinta,
+   a válaszok, a beviteli mező és a kiemelt címkék.
+
+   A felismerés emellett megmarad, de nem "egyszer angolul válaszol":
+   ÁTBILLENTI ezt a kapcsolót. Aki angolul kérdez anélkül, hogy észrevette
+   volna a gombot, attól kezdve mindent angolul kap — és a gombon látja is,
+   hogy EN-re váltott.
+   ============================================================ */
+
+.flux-fejlec {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.flux-nyelv {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #1e3350;
+  border-radius: 999px;
+}
+
+.flux-nyelv-gomb {
+  min-width: 34px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: #5b7a92;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-align: center;
+  transition: color 160ms ease, background 160ms ease;
+  user-select: none;
+}
+
+.flux-nyelv-gomb:hover {
+  color: #dbe7f2;
+}
+
+/* Az aktív nyelv ugyanazt a zöldet kapja, mint a FLUX-pötty és a kurzor —
+   egy vizuális család, nem külön dísz. */
+.flux-nyelv-gomb.aktiv {
+  color: #04121f;
+  background: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+}
+
+@media (max-width: 760px) {
+  .flux-nyelv-gomb {
+    min-width: 40px;
+    padding: 7px 11px;   /* ujjal is eltalálható méret */
+    font-size: 11px;
+  }
+}
