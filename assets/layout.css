@@ -1566,3 +1566,112 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .flux-kurzor { animation: none; }
 }
+
+
+/* ============================================================
+   1. JAVÍTÁS — A KPI-SÁV CSÚSZKÁJA
+
+   Edge-ben egy szürke vízszintes görgetősáv jelent meg a kártyák
+   alatt, Chrome-ban nem. Ugyanaz a HTML: a Chrome lebegő (overlay)
+   sávot rajzol, ami eltűnik használaton kívül, az Edge viszont
+   klasszikus, helyet foglaló sávot.
+
+   A görgetés maga kell — a hat kártya minimum 1190 px széles, tehát
+   kisebb ablakban tényleg húzni kell. Csak a SÁV tűnik el; egérgörgővel,
+   érintéssel és a billentyűzettel is görgethető marad.
+   ============================================================ */
+
+.kpi-strip,
+#kpi-sor {
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* régi Edge / IE */
+}
+
+.kpi-strip::-webkit-scrollbar,
+#kpi-sor::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;                /* Chrome, Edge, Safari */
+}
+
+/* Az érintéses görgetés legyen sima, és a kártyák szélén álljon meg */
+.kpi-strip,
+#kpi-sor {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+
+/* ============================================================
+   2. JAVÍTÁS — MOBILNÉZET
+
+   a) Fülsáv: öt fül két oszlopban három sorba tört, a harmadik sorban
+      egyetlen árva füllel. Helyette egysoros, vízszintesen görgethető
+      sáv — ugyanaz a logika, mint a KPI-sornál, csúszka nélkül.
+
+   b) KPI-sáv: 390 px-en a hat kártya háromszoros szélességű. A jobb
+      szélen halvány kifutó árnyék jelzi, hogy van még kártya oldalra.
+
+   c) Flux 760–900 px között: eddig csak 760 px ALATT került a kép alá.
+      A köztes sávban (fekvő telefon, kis tablet) a kép már alacsony
+      volt, a beviteli mező mégis rárétegződött és levágódhatott.
+      A törésponti határ 900 px-re kerül.
+   ============================================================ */
+
+/* a) Egysoros, görgethető fülsáv mobilon */
+@media (max-width: 700px) {
+  .nav-tabs-row {
+    display: flex !important;
+    grid-template-columns: none !important;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .nav-tabs-row::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  .nav-tab {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+}
+
+/* b) Kifutó árnyék a KPI-sáv jobb szélén — jelzi, hogy van még kártya */
+@media (max-width: 980px) {
+  .kpi-strip {
+    position: relative;
+    -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 92%, transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0%, #000 92%, transparent 100%);
+  }
+}
+
+/* c) A Flux-réteg már 900 px alatt a kép ALÁ kerül, nem rá */
+@media (max-width: 900px) {
+  .flux-reteg {
+    position: static;
+    top: auto;
+    left: auto;
+    width: auto;
+    padding: 16px 16px 20px;
+    gap: 12px;
+    text-shadow: none;
+  }
+
+  .flux-reteg > div:nth-child(2) {
+    font-size: 14px;
+    min-height: 72px;
+  }
+
+  .flux-kerdes {
+    width: 100%;
+    font-size: 16px;
+    padding: 11px 2px;
+  }
+}
