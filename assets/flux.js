@@ -1,13 +1,13 @@
 /* Flux gépelése — teljesen a Dash frissítési körén kívül.
 
-   Miért így: a Dash 15 mp-enként újraépítheti az oldal tartalmát. Ha a
-   gépelést callback hajtaná, minden újraépítés nullázná a szöveget — ezért
-   villogott és kezdte elölről. Ez a hurok saját állapotot tart, és minden
-   képkockán megkeresi a cél-elemeket; ha a Dash kicseréli őket, a szöveg
-   egy pillanat alatt visszaíródik ugyanoda, ahol tartott. */
+   Miért így: a Dash bármikor újraépítheti az oldal tartalmát. Ha a gépelést
+   callback hajtaná, minden újraépítés nullázná a szöveget — ezért villogott és
+   kezdte elölről. Ez a hurok saját állapotot tart, és minden képkockán
+   megkeresi a cél-elemeket; ha a Dash kicseréli őket, a szöveg egy pillanat
+   alatt visszaíródik ugyanoda, ahol tartott. */
 
 (function () {
-  const FLUX_VERZIO = "2026-08-04-d";
+  const FLUX_VERZIO = "2026-08-15-a";
   const KARAKTER_MS = 35;      // ~29 karakter / másodperc — gyorsan kiírja
   const KITARTAS_MIN = 6000;   // rövid megállapítás ennyit marad kint
   const KITARTAS_MAX = 10000;  // hosszú megállapítás legfeljebb ennyit
@@ -19,8 +19,7 @@
      Nem a GÉPELÉSNEK kell lassúnak lennie — azt nézni idegőrlő —, hanem a
      kész mondatnak kell sokáig kint maradnia. Ezért a gépelés gyors, a
      kitartás viszont a mondat hosszához igazodik: rövidnél 6, hosszúnál
-     10 másodperc. Egy 180 karakteres megállapítás így 6 másodperc alatt
-     kiíródik, majd további 9 másodpercig olvasható. */
+     10 másodperc. */
   function kitartas(sor) {
     const ms = 3000 + sor.length * 35;
     return Math.min(KITARTAS_MAX, Math.max(KITARTAS_MIN, ms));
@@ -30,8 +29,8 @@
     i: 0, k: 0, utolso: 0, varakozasKezdet: 0,
     valaszKulcs: null, valaszAktiv: false, varakozott: false,
     kezdoLatott: false, korPozicio: 0,
-    fokusz: false, fokuszOta: 0, gepeltUtoljara: 0, egerRajta: false,
-    szunetKezdet: 0,
+    gepeltUtoljara: 0, egerRajta: false,
+    passzivSzunetKezdet: 0,
   };
 
   const el = (id) => document.getElementById(id);
@@ -44,16 +43,12 @@
     const d = window.FLUX_DATA || {};
     let uz = Array.isArray(d.uzenetek) ? d.uzenetek : [];
 
-    /* A köszöntő EGYSZER megy le, utána kikerül a körből. Korábban minden
-       fordulóban — és minden válasz után azonnal — újrakezdte a
-       "Szia, Flux vagyok..." mondattal az egész felsorolást. */
+    /* A köszöntő EGYSZER megy le, utána kikerül a körből. */
     if (st.kezdoLatott) uz = uz.filter((m) => !m.kezdo);
 
     /* A kérdés elküldése és a válasz megérkezése között akár néhány másodperc
-       is eltelhet (a szerver ilyenkor kérdezi meg az élő adatokat). Ha ez alatt
-       a szokásos körbe-körbe járó szöveg futna tovább, a látogató azt hiszi,
-       Flux nem is hallotta meg a kérdést. Ezért erre az időre egyetlen,
-       egyértelmű sor marad kint. */
+       is eltelhet. Ha ez alatt a szokásos körbe-körbe járó szöveg futna
+       tovább, a látogató azt hiszi, Flux nem is hallotta meg a kérdést. */
     if (window.FLUX_VARAKOZAS) {
       if (!st.varakozott) { st.varakozott = true; ujrakezd(); }
       return [{ sor: VARAKOZO_SOR, szam: null, cimke: null }];
@@ -62,8 +57,7 @@
 
     if (d.valasz) {
       /* A kulcsban benne van a szerver által adott sorszám is, ezért ugyanaz a
-         kérdés másodszorra is lejátszódik — korábban a változatlan szöveg miatt
-         a második kérdésre látszólag semmi nem történt. */
+         kérdés másodszorra is lejátszódik. */
       const kulcs = JSON.stringify(d.valasz);
       if (st.valaszKulcs !== kulcs) {
         st.valaszKulcs = kulcs;
@@ -97,8 +91,7 @@
       st.k = 0;
       if (uz.kezdo) st.kezdoLatott = true;
       if (st.valaszAktiv) {
-        /* A válasz után OTT folytatjuk, ahol a kör tartott — nem ugrunk
-           vissza a lista elejére, tehát nem indul újra a köszöntővel. */
+        /* A válasz után OTT folytatjuk, ahol a kör tartott. */
         st.valaszAktiv = false;
         st.i = st.korPozicio;
       } else {
@@ -125,24 +118,40 @@
     if (doboz) doboz.style.display = ertek ? "flex" : "none";
   }
 
-  /* Amíg a látogató a kérdés-mezőben van, a szöveg MEGÁLL azon a
-     megállapításon, amit éppen olvas. Enélkül mire megfogalmazta a kérdést,
-     Flux már két témával odébb járt, és a kérdés a semmire vonatkozott. */
-  /* A fókusz- és gépelés-figyelés a DOCUMENT szintjén megy, nem magán a
-     mezőn. Ez azért fontos, mert a Dash az oldal újraépítésekor kicseréli a
-     beviteli mezőt egy ÚJ elemre; a régire aggatott figyelő ilyenkor a
-     semmivel maradna, és a szünet néma módon abbamaradna. A delegált
-     figyelő az elemcserét is túléli. */
-  document.addEventListener("focusin", function (e) {
-    if (e.target && e.target.id === "flux-kerdes") {
-      st.fokusz = true;
-      st.fokuszOta = Date.now();
-    }
-  });
-  document.addEventListener("focusout", function (e) {
-    if (e.target && e.target.id === "flux-kerdes") st.fokusz = false;
-  });
+  /* ------------------------------------------------------------------
+     A SZÜNET — újraírva.
+
+     A régi változat a fókuszt ESEMÉNYBŐL tartotta nyilván (`focusin` /
+     `focusout`). Ez akkor romlik el, amikor a Dash újraépíti az oldalt: a
+     beviteli mező ilyenkor ÚJ elemre cserélődik, a régi eltűnik — `focusout`
+     viszont nem mindig fut le rá. A jelző ilyenkor hamis állapotba ragad, és
+     onnantól vagy örökre szünetel, vagy soha többé nem szünetel.
+
+     Emiatt viselkedett úgy, hogy CSAK AZ ELSŐ kérdésnél állt meg: a második
+     gépeléskor a jelző már nem a valóságot mutatta.
+
+     Mostantól minden képkockán a `document.activeElement`-et nézzük meg. Ez
+     mindig a valóság, elemcsere után is.
+
+     A szünet-okok két csoportba kerülnek:
+
+       AKTÍV  — a látogató épp dolgozik: a mezőben a kurzor, friss leütés,
+                vagy beírt, még el nem küldött szöveg. Ezt SEMMI nem szakítja
+                félbe; ameddig gépel, addig áll a szöveg.
+
+       PASSZÍV — az egér ottfelejtődött a szövegen, vagy megmaradt egy régi
+                kijelölés. Ezek be tudnak ragadni, ezért 45 másodperc után a
+                kör mindenképp folytatódik.
+     ------------------------------------------------------------------ */
+  const PASSZIV_SZUNET_MAX = 45000;
+  const GEPELES_UTAN_MS = 8000;   // az utolsó leütés után ennyit még várunk
+
   document.addEventListener("input", function (e) {
+    if (e.target && e.target.id === "flux-kerdes") st.gepeltUtoljara = Date.now();
+  });
+  /* A kattintás/fókusz is számít friss aktivitásnak: aki most kattintott a
+     mezőbe, még le sem ütött egy billentyűt sem, de már gondolkodik. */
+  document.addEventListener("focusin", function (e) {
     if (e.target && e.target.id === "flux-kerdes") st.gepeltUtoljara = Date.now();
   });
   document.addEventListener("mouseover", function (e) {
@@ -150,36 +159,28 @@
                       e.target.closest(".flux-reteg"));
   });
 
-  /* Egyetlen szünet sem tarthat tovább ennél — bármi is okozza.
+  function mezoben() {
+    const a = document.activeElement;
+    return !!(a && a.id === "flux-kerdes");
+  }
 
-     Külön-külön minden szünet-ok ésszerű: a mezőben áll a kurzor, épp gépel,
-     az egér a szöveg fölött van, vagy kijelölte a mondatot másoláshoz. A baj
-     az, hogy MINDEGYIK be tud ragadni: az Enter után a fókusz a mezőben marad,
-     a másolás után a kijelölés megmarad, az egér ottfelejtődik. Ilyenkor a
-     szöveg véglegesen befagy, és a látogató azt hiszi, elromlott az oldal.
-     Ezért a szünet okát nem foltozzuk egyesével, hanem az IDEJÉT korlátozzuk:
-     ennyi után a kör mindenképp folytatódik. */
-  const SZUNET_MAX = 45000;
+  function aktivSzunet() {
+    // 1) A mezőben áll a kurzor — élő állapotból olvasva, nem eseményből.
+    if (mezoben()) return true;
+    // 2) Az utolsó leütés óta még nem telt el elég idő.
+    if (st.gepeltUtoljara && Date.now() - st.gepeltUtoljara < GEPELES_UTAN_MS) {
+      return true;
+    }
+    // 3) Van beírt, még el nem küldött szöveg.
+    const mezo = el("flux-kerdes");
+    return !!(mezo && mezo.value && mezo.value.trim());
+  }
 
-  function szunetel() {
-    /* 0) A VÁLASZT semmi nem tarthatja fel.
-
-       Ez volt a hiba: Enter utan a kurzor a mezoben MARAD, tehat a lenti
-       fokusz-feltetel orokre igaznak bizonyult. A valasz kiirodott, aztan a
-       hurok megallt rajta — a szoveg percekig kint maradt, es soha nem jott
-       utana semmi. A valasz lejatszasa alatt ezert nincs szunet. */
-    if (st.valaszAktiv) return false;
-
-    // 1) A mezőben áll a kurzor.
-    if (st.fokusz) return true;
-    // 2) Az utolsó leütés óta 8 másodpercen belül vagyunk.
-    if (st.gepeltUtoljara && Date.now() - st.gepeltUtoljara < 8000) return true;
-    // 3) Egérrel a szöveg fölött — aki újra el akarja olvasni vagy le akarja
-    //    írni a számot, ne rohanjon el előle a mondat.
+  function passzivSzunet() {
+    // Egérrel a szöveg fölött — aki újra el akarja olvasni vagy le akarja
+    // írni a számot, ne rohanjon el előle a mondat.
     if (st.egerRajta) return true;
-    // 4) A látogató épp KIJELÖLTE a szöveget, mert ki akarja másolni.
-    //    A gépelő hurok minden képkockán újraírja a tartalmat, ami eldobná
-    //    a kijelölést — ezért ilyenkor hozzá sem nyúlunk.
+    // A látogató épp KIJELÖLTE a szöveget, mert ki akarja másolni.
     try {
       const kijeloles = window.getSelection();
       if (kijeloles && !kijeloles.isCollapsed && kijeloles.rangeCount > 0) {
@@ -188,28 +189,36 @@
         if (elem && elem.closest && elem.closest(".flux-reteg")) return true;
       }
     } catch (e) { /* nem baj, csak a kijelölés-szünet marad el */ }
-    // 5) Van beírt, még el nem küldött szöveg.
-    const mezo = el("flux-kerdes");
-    return !!(mezo && mezo.value && mezo.value.trim());
+    return false;
+  }
+
+  function szunetel() {
+    /* A VÁLASZT semmi nem tarthatja fel: Enter után a kurzor a mezőben marad,
+       tehát az aktív feltétel örökre igaz lenne, és a válasz kint ragadna. */
+    if (st.valaszAktiv) { st.passzivSzunetKezdet = 0; return false; }
+
+    if (aktivSzunet()) {
+      // Aktív szünet: nincs időkorlát, és a passzív mérő is nullázódik.
+      st.passzivSzunetKezdet = 0;
+      return true;
+    }
+
+    if (passzivSzunet()) {
+      if (!st.passzivSzunetKezdet) st.passzivSzunetKezdet = Date.now();
+      return Date.now() - st.passzivSzunetKezdet <= PASSZIV_SZUNET_MAX;
+    }
+
+    st.passzivSzunetKezdet = 0;
+    return false;
   }
 
   function hurok(most) {
     try {
-      /* A szünet mérése: amint megszűnik az ok, a mérő nullázódik. Ha viszont
-         egyfolytában tart, a felső korlát után akkor is továbblépünk. */
       if (szunetel()) {
-        if (!st.szunetKezdet) st.szunetKezdet = Date.now();
-      } else {
-        st.szunetKezdet = 0;
-      }
-      const beragadt = st.szunetKezdet &&
-                       Date.now() - st.szunetKezdet > SZUNET_MAX;
-
-      if (st.szunetKezdet && !beragadt) {
         /* Megállunk, de a félbehagyott mondatot végiggépeljük, hogy ne
            csonka szöveg maradjon a képernyőn. */
         const l = lista();
-        const uz = l[Math.min(st.i, l.length - 1)] || {};
+        const uz = l[Math.min(st.i, Math.max(0, l.length - 1))] || {};
         const sor = uz.sor || "";
         if (st.k < sor.length) lepes(most);
         else { st.varakozasKezdet = most; lepes(most); }
