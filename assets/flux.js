@@ -7,12 +7,23 @@
    alatt visszaíródik ugyanoda, ahol tartott. */
 
 (function () {
-  const FLUX_VERZIO = "2026-08-15-a";
+  const FLUX_VERZIO = "2026-08-15-b";
   const KARAKTER_MS = 35;      // ~29 karakter / másodperc — gyorsan kiírja
   const KITARTAS_MIN = 6000;   // rövid megállapítás ennyit marad kint
   const KITARTAS_MAX = 10000;  // hosszú megállapítás legfeljebb ennyit
 
-  const VARAKOZO_SOR = "Egy pillanat, megnézem az élő adatokat…";
+  /* A várakozó sor NYELVFÜGGŐ. A szerver a `window.FLUX_NYELV`-be teszi a
+     HU/EN kapcsoló állását; ha még nincs beállítva, magyar az alapértelmezés.
+     Enélkül az angolra váltott látogató minden kérdésnél kapott egy magyar
+     mondatot — pont abban a pillanatban, amikor a legjobban figyel. */
+  const VARAKOZO_SOROK = {
+    hu: "Egy pillanat, megnézem az élő adatokat…",
+    en: "One moment, let me check the live data…",
+  };
+
+  function varakozoSor() {
+    return VARAKOZO_SOROK[window.FLUX_NYELV] || VARAKOZO_SOROK.hu;
+  }
 
   /* Mennyi ideig maradjon kint a kész mondat.
 
@@ -51,7 +62,7 @@
        tovább, a látogató azt hiszi, Flux nem is hallotta meg a kérdést. */
     if (window.FLUX_VARAKOZAS) {
       if (!st.varakozott) { st.varakozott = true; ujrakezd(); }
-      return [{ sor: VARAKOZO_SOR, szam: null, cimke: null }];
+      return [{ sor: varakozoSor(), szam: null, cimke: null }];
     }
     if (st.varakozott) { st.varakozott = false; ujrakezd(); }
 
