@@ -1225,11 +1225,16 @@ def kpi(cim, val, sub, szin, trend=None, jelolt_i=None):
     #   3. Budapest, 4. EUR/HUF               -> layout.css ::after (kép)
     #   5. Legolcsóbb ablak, 6. Adatminőség   -> innen
     vizual = None
-    if "dam" in cim_lower or "fogyasztás" in cim_lower:
+    # A felismerés MINDKÉT nyelv szavaira illeszkedik. Enélkül angol
+    # kártyacím mellett egyetlen sparkline sem jelent volna meg — a kártyák
+    # üresen maradtak volna, és ez a legfeltűnőbb hiba, amit a nyelvváltás
+    # okozhatott volna.
+    if ("dam" in cim_lower or "fogyasztás" in cim_lower
+            or "consumption" in cim_lower):
         vizual = _mini_sparkline(trend, szin, jelolt_i)
-    elif "legolcsóbb" in cim_lower:
+    elif "legolcsóbb" in cim_lower or "cheapest" in cim_lower:
         vizual = _segment_bar(szin)
-    elif "adatminőség" in cim_lower:
+    elif "adatminőség" in cim_lower or "data quality" in cim_lower:
         vizual = _quality_bars(szin, val)
 
     card_style = {
@@ -1353,6 +1358,22 @@ app.layout = html.Div([
         dcc.Store(id="flux-noop",data=None),
         dcc.Store(id="flux-varakozas",data=None),
         dcc.Store(id="flux-kerdes-kontextus",data=None),
+
+        # ---- Flux nyelve és beszélgetés-előzménye ----
+        #
+        # `flux-nyelv` a HU/EN kapcsoló állapota. Azért Store és nem a böngésző
+        # belső ügye, mert a SZERVERNEK kell tudnia: a körbejáró szöveget és a
+        # válaszokat is ez határozza meg. Két helyről íródhat: a látogató
+        # kattintásából, és a nyelvfelismerésből — aki angolul kérdez, annál a
+        # kapcsoló magától átbillen.
+        #
+        # `flux-elozmeny` az utolsó néhány kérdés-válasz pár. Ettől lesz
+        # beszélgetés a kérdezősködésből: enélkül Flux nem tudta, MIT köszönnek
+        # meg neki, és az "és holnap?" kérdéssel sem tudott mit kezdeni. A
+        # böngészőben él, tehát a szerver állapotmentes marad — több worker
+        # mellett sem keverednek össze a látogatók beszélgetései.
+        dcc.Store(id="flux-nyelv",data="hu"),
+        dcc.Store(id="flux-elozmeny",data=[]),
     ],className="app-main")
 ],className="app-shell")
 
@@ -1662,13 +1683,55 @@ def _kpi_naplo(data):
 def _kpi_nyitott(data):
     return sum(1 for r in _kpi_naplo(data) if r.get("kategoria") == "rejtely")
 
-def _kpi_or_felirat(data):
+def _kpi_or_felirat(data, nyelv="hu"):
     naplo = _kpi_naplo(data)
     if not naplo:
-        return "Nincs jelzés az elmúlt 7 napban"
+        return ("No alerts in the last 7 days" if nyelv == "en"
+                else "Nincs jelzés az elmúlt 7 napban")
     megm = sum(1 for r in naplo
                if r.get("kategoria") in ("extrem", "napelem", "fordulat"))
+    if nyelv == "en":
+        return f"{len(naplo)} alerts in 7 days · {megm} explained"
     return f"{len(naplo)} jelzés 7 nap · {megm} megmagyarázva"
+
+
+# ============================================================
+# A KPI-KÁRTYÁK FELIRATAI KÉT NYELVEN
+#
+# A hat kártya a fejléc alatt mindig látszik, ezért a nyelvváltásnak ezekre is
+# ki kell terjednie — különben angol Flux fölött magyar kártyacímek állnának.
+# A grafikonok és a többi fül egyelőre magyar marad; azok fordítása külön
+# lépés, mert ott a tengelycímek és a hosszú magyarázó szövegek is érintettek.
+# ============================================================
+KPI_SZOVEG = {
+    "hu": {
+        "dam": "Jelenlegi DAM ár", "fogyasztas": "Előrejelzett fogyasztás",
+        "budapest": "Budapest", "eurhuf": "EUR/HUF",
+        "ablak": "Legolcsóbb ablak", "ador": "Adatminőség-őr",
+        "most": "Most", "arfolyam": "Árfolyam",
+        "nincs_ar": "Nincs publikált ár",
+        "nincs_elorejelzes": "Előrejelzés nem elérhető",
+        "nem_elerheto": "Nem elérhető", "nyitott": "{n} nyitott",
+        "negativ": "Negatív ár", "olcso": "Olcsó", "draga": "Drága",
+        "atlagos": "Átlagos", "aktualis": "Aktuális ár",
+    },
+    "en": {
+        "dam": "Current DAM price", "fogyasztas": "Forecast consumption",
+        "budapest": "Budapest", "eurhuf": "EUR/HUF",
+        "ablak": "Cheapest window", "ador": "Data quality guard",
+        "most": "Now", "arfolyam": "Exchange rate",
+        "nincs_ar": "No published price",
+        "nincs_elorejelzes": "Forecast unavailable",
+        "nem_elerheto": "Unavailable", "nyitott": "{n} open",
+        "negativ": "Negative price", "olcso": "Cheap", "draga": "Expensive",
+        "atlagos": "Average", "aktualis": "Current price",
+    },
+}
+
+
+def _kpi_t(nyelv, kulcs, **kw):
+    s = KPI_SZOVEG.get(nyelv, KPI_SZOVEG["hu"]).get(kulcs, "")
+    return s.format(**kw) if kw else s
 
 def _kpi_or_szin(data):
     ny = _kpi_nyitott(data)
@@ -1686,8 +1749,13 @@ NB = {"display":"flex","alignItems":"center","justifyContent":"center",
     Output("nav-fooldal","style"),Output("nav-toltes","style"),
     Output("nav-elemzes","style"),Output("nav-megujulok","style"),
     Output("nav-mllabor","style")],
-    [Input("adatok","data"),Input("oldal","data")])
-def render(data,oldal):
+    [Input("adatok","data"),Input("oldal","data"),Input("flux-nyelv","data")])
+def render(data,oldal,nyelv):
+    # A NYELV azért Input és nem State: nyelvváltáskor a teljes hero-panelt
+    # újra kell építeni (kapcsoló-állapot, a beviteli mező felirata), és a
+    # KPI-kártyák feliratait is. A `flux.js` az újraépítést eleve túléli —
+    # saját állapotot tart, ezért a gépelés nem kezdődik elölről.
+    nyelv = nyelv if nyelv in ("hu", "en") else "hu"
     ns=[{**NB,"color":C['gr'],"borderBottom":f"2px solid {C['gr']}"} if oldal==x
         else {**NB,"color":C['mut'],"borderBottom":"2px solid transparent"}
         for x in ["fooldal","toltes","elemzes","megujulok","mllabor"]]
@@ -1734,7 +1802,7 @@ def render(data,oldal):
     # sorba. Így a mértékegység-leválasztás is működik, és nem vágja le az
     # ellipszis (a "Holnap 13:15 · 3 €" nem fért ki egy sorban).
     legolcs_ar = "–"
-    legolcs_ido = "Nincs publikált ár"
+    legolcs_ido = _kpi_t(nyelv, "nincs_ar")
     if aj:
         k = datetime.fromisoformat(aj["aj_kezd"])
         v = datetime.fromisoformat(aj["aj_veg"])
@@ -1779,15 +1847,17 @@ def render(data,oldal):
     # valódi tartalmat kap: az elmúlt hónap legdrágább negyedébe esik.
     sav = data.get("dam_sav") or {}
     if dam_most < 0:
-        kat = "Negatív ár"
+        kat = _kpi_t(nyelv, "negativ")
     elif sav.get("p25") is not None:
-        kat = ("Olcsó" if dam_most <= sav["p25"] else
-               ("Drága" if dam_most >= sav["p75"] else "Átlagos"))
+        kat = (_kpi_t(nyelv, "olcso") if dam_most <= sav["p25"] else
+               (_kpi_t(nyelv, "draga") if dam_most >= sav["p75"]
+                else _kpi_t(nyelv, "atlagos")))
     elif ma_atlag:
         # Tartalék, amíg nincs elég előzmény (pl. első indulás után).
-        kat = "Olcsó" if dam_most < ma_atlag else "Drága"
+        kat = (_kpi_t(nyelv, "olcso") if dam_most < ma_atlag
+               else _kpi_t(nyelv, "draga"))
     else:
-        kat = "Aktuális ár"
+        kat = _kpi_t(nyelv, "aktualis")
 
     # A modell jóslata AZ AKTUÁLIS ÓRÁRA. Nem eredm[0]-t veszünk: a célablak
     # első sora rendszerint a most futó óra, de az ENTSO-E mérési késése
@@ -1807,25 +1877,27 @@ def render(data,oldal):
     stl_napok = data.get("stl_napok") or 0
 
     ksor=html.Div([
-        kpi("Jelenlegi DAM ár",f"{dam_most:.0f} €/MWh",kat,dam_sz,
+        kpi(_kpi_t(nyelv,"dam"),f"{dam_most:.0f} €/MWh",kat,dam_sz,
             dam_ma or None, dam_jelolt),
-        kpi("Előrejelzett fogyasztás",
+        kpi(_kpi_t(nyelv,"fogyasztas"),
             f"{akt_sor['fogyasztas']:,.0f} MWh".replace(","," ") if akt_sor else "–",
             (f"CatBoost V10 · {datetime.fromisoformat(akt_sor['datum']):%H:%M}"
-             if akt_sor else "Előrejelzés nem elérhető"),
+             if akt_sor else _kpi_t(nyelv,"nincs_elorejelzes")),
             C['bl'], edf["fogyasztas"].tolist() if edf is not None else None,
             int(np.argmax(edf["fogyasztas"].values)) if edf is not None else None),
-        kpi("Budapest",f"{aho:.0f} °C" if aho is not None else "–","Most",C['yw']),
-        kpi("EUR/HUF",f"{eur_huf:.1f} Ft" if eur_huf is not None else "–","Árfolyam",C['bl']),
-        kpi("Legolcsóbb ablak",legolcs_ar,legolcs_ido,C['gr']),
-        kpi("Adatminőség-őr",
-            f"{_kpi_nyitott(data)} nyitott" if data["stl"] else "–",
-            _kpi_or_felirat(data) if data["stl"] else "Nem elérhető",
+        kpi(_kpi_t(nyelv,"budapest"),f"{aho:.0f} °C" if aho is not None else "–",
+            _kpi_t(nyelv,"most"),C['yw']),
+        kpi(_kpi_t(nyelv,"eurhuf"),f"{eur_huf:.1f} Ft" if eur_huf is not None else "–",
+            _kpi_t(nyelv,"arfolyam"),C['bl']),
+        kpi(_kpi_t(nyelv,"ablak"),legolcs_ar,legolcs_ido,C['gr']),
+        kpi(_kpi_t(nyelv,"ador"),
+            _kpi_t(nyelv,"nyitott",n=_kpi_nyitott(data)) if data["stl"] else "–",
+            _kpi_or_felirat(data, nyelv) if data["stl"] else _kpi_t(nyelv,"nem_elerheto"),
             _kpi_or_szin(data)),
     ],className="kpi-grid", style=KPI_GRID_STYLE)
 
     if oldal=="fooldal":
-        page = nyitooldal()
+        page = nyitooldal(nyelv)
     elif oldal=="toltes":
         page=fooldal(data,aj)
     elif oldal=="elemzes":
@@ -1839,15 +1911,39 @@ def render(data,oldal):
 # ============================================================
 # ÚJ FŐOLDAL — nyitó vizuál (a KPI-sort és a fejlécet a layout rajzolja)
 # ============================================================
-def nyitooldal():
+# A beviteli mező felirata. Magyar módban KÉTNYELVŰ: ez az egyik jelzés arról,
+# hogy Flux angolul is tud. A másik a körbejáró szövegek közé kevert angol
+# mondat (lásd flux.py, "zaro_angol_tipp").
+FLUX_PLACEHOLDER = {
+    "hu": "Kérdezz Fluxtól / Ask Flux…",
+    "en": "Ask Flux, then press Enter…",
+}
+
+
+def nyitooldal(nyelv="hu"):
     """Nyitó vizuál + Flux. A szöveg keret nélkül, az égbolt előtt jelenik meg."""
+    nyelv = nyelv if nyelv in ("hu", "en") else "hu"
+
+    def _nyelv_gomb(kod, felirat):
+        aktiv = (kod == nyelv)
+        return html.Div(felirat, id=f"flux-nyelv-{kod}", n_clicks=0,
+                        className="flux-nyelv-gomb" + (" aktiv" if aktiv else ""),
+                        title=("Váltás magyarra" if kod == "hu"
+                               else "Switch to English"))
+
     flux_reteg = html.Div([
+        # A fejléc-sor: balra a FLUX-jel, jobbra a HU/EN kapcsoló.
         html.Div([
-            html.Div(style={"width":"5px","height":"5px","borderRadius":"999px",
-                            "background":C['gr'],"boxShadow":f"0 0 8px {_rgba(C['gr'],.8)}"}),
-            html.Div("FLUX",style={"color":"#5b7a92","fontSize":"10px","fontWeight":"700",
-                                   "letterSpacing":"3px"})
-        ],style={"display":"flex","alignItems":"center","gap":"7px"}),
+            html.Div([
+                html.Div(style={"width":"5px","height":"5px","borderRadius":"999px",
+                                "background":C['gr'],
+                                "boxShadow":f"0 0 8px {_rgba(C['gr'],.8)}"}),
+                html.Div("FLUX",style={"color":"#5b7a92","fontSize":"10px",
+                                       "fontWeight":"700","letterSpacing":"3px"})
+            ],style={"display":"flex","alignItems":"center","gap":"7px"}),
+            html.Div([_nyelv_gomb("hu","HU"), _nyelv_gomb("en","EN")],
+                     className="flux-nyelv"),
+        ], className="flux-fejlec"),
 
         html.Div([
             html.Span(id="flux-szoveg"),
@@ -1869,7 +1965,7 @@ def nyitooldal():
         # Enterre indul el a válasz. A debounce az Enterre egyszerre küldi a
         # kettőt, így az első leütés is működik.
         dcc.Input(id="flux-kerdes",type="text",debounce=True,
-                  placeholder="Kérdezz Fluxtól, majd Enter…",className="flux-kerdes"),
+                  placeholder=FLUX_PLACEHOLDER[nyelv],className="flux-kerdes"),
 
     ],className="flux-reteg")
 
@@ -1885,18 +1981,21 @@ def nyitooldal():
 
 # ---- Flux: szövegek az élő adatokból (Gemini a szerveren, flux.py) ----
 @callback(Output("flux-uzenetek","data"),
-    Input("adatok","data"),
+    [Input("adatok","data"),Input("flux-nyelv","data")],
     prevent_initial_call=False)
-def flux_szovegek(data):
+def flux_szovegek(data, nyelv):
+    nyelv = nyelv if nyelv in ("hu", "en") else "hu"
     if not data or data.get("kritikus_hiba"):
-        return [{"sor":"Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
+        return [{"sor":("Waiting for live data — as soon as it arrives, I'll tell "
+                        "you what's happening." if nyelv == "en" else
+                        "Élő adatokra várok — amint megérkeznek, mondom, mi történik."),
                  "szam":None,"cimke":None}]
     try:
         aj = toltes_ajanlas(data["negyed"]) if data.get("negyed") else None
-        return flux.uzenetek(data, aj)
+        return flux.uzenetek(data, aj, nyelv=nyelv)
     except Exception as e:
         print(f"[FLUX] Szövegek: {e}", flush=True)
-        return [{"sor":flux.elo_koszonto(),"szam":None,"cimke":None}]
+        return [{"sor":flux.elo_koszonto(nyelv),"szam":None,"cimke":None}]
 
 
 # ---- Flux: a látogató kérdése ----
@@ -1906,41 +2005,98 @@ def flux_szovegek(data):
 # megállapítást, és csak utána indul a szerveroldali válasz — amely így már
 # ismeri a kérdés kontextusát. Fordított sorrendben a szerver mindig az előző
 # képernyőállapotot látná.
-@callback([Output("flux-valasz","data"),Output("flux-kerdes","value")],
+# ÚJ: a beszélgetés-előzmény is megy oda-vissza. A kérdéssel együtt beérkezik
+# az utolsó néhány forduló, a válasszal együtt pedig kibővítve visszamegy a
+# böngészőbe. Ettől lesz folytonos a beszélgetés: Flux tudja, mit köszönnek meg
+# neki, és mire vonatkozik az "és holnap?".
+@callback([Output("flux-valasz","data"),Output("flux-kerdes","value"),
+           Output("flux-elozmeny","data")],
     Input("flux-kerdes-kontextus","data"),
-    [State("flux-kerdes","value"),State("adatok","data")],
+    [State("flux-kerdes","value"),State("adatok","data"),
+     State("flux-nyelv","data"),State("flux-elozmeny","data")],
     prevent_initial_call=True)
-def flux_kerdes(kontextus, kerdes, data):
+def flux_kerdes(kontextus, kerdes, data, nyelv, elozmeny):
     if not kerdes or not str(kerdes).strip():
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
+    nyelv = nyelv if nyelv in ("hu", "en") else "hu"
     try:
         aj = toltes_ajanlas(data["negyed"]) if (data or {}).get("negyed") else None
         v = flux.valasz(kerdes, data, aj,
                         kontextus=(kontextus or {}).get("sor"),
-                        mar_koszont=bool((kontextus or {}).get("mar_koszont")))
+                        mar_koszont=bool((kontextus or {}).get("mar_koszont")),
+                        nyelv=nyelv,
+                        elozmeny=elozmeny or [])
     except Exception as e:
         print(f"[FLUX] Kérdés callback: {e}", flush=True)
-        v = {"sor":"Erre az élő adatokból most nem tudok pontos választ adni.",
+        v = {"sor":("I can't give a precise answer to that from the live data "
+                    "right now." if nyelv == "en" else
+                    "Erre az élő adatokból most nem tudok pontos választ adni."),
              "szam":None,"cimke":None}
+    uj_elozmeny = flux.elozmeny_bovit(elozmeny, kerdes, v.get("sor"))
     # A sorszám nélkül a böngésző nem venné észre, ha valaki UGYANAZT kérdezi
     # kétszer: a `dcc.Store` értéke betűre azonos lenne, a gépelés nem indulna
     # újra, és a látogató úgy látná, hogy Flux másodszorra nem válaszol.
-    return {**v, "_n": int(time.time() * 1000)}, ""
+    return {**v, "_n": int(time.time() * 1000)}, "", uj_elozmeny
+
+
+# ============================================================
+# A NYELV KAPCSOLÁSA — két úton
+#
+# 1) A látogató rákattint a HU vagy EN gombra. Ez az egyértelmű eset.
+#
+# 2) A látogató ANGOLUL kérdez, anélkül hogy észrevette volna a gombot.
+#    Ilyenkor a flux.py felismeri a nyelvet, angolul válaszol, és a válaszban
+#    jelzi is (`nyelv` mező). Ez a callback ebből ÁTBILLENTI a kapcsolót — így
+#    nem fordulhat elő, hogy az angol válasz után magyarul folytatódik a
+#    körhinta, és a látogató a gombon is látja, hogy EN-re váltott.
+#
+# Két külön callback ír ugyanarra a Store-ra, ezért kell az `allow_duplicate`.
+# Egy callbackbe összevonva a gombok hiánya a többi fülön (ahol a hero-panel
+# nem létezik) megzavarná a másik ágat is.
+# ============================================================
+@callback(Output("flux-nyelv","data"),
+    [Input("flux-nyelv-hu","n_clicks"),Input("flux-nyelv-en","n_clicks")],
+    prevent_initial_call=True)
+def flux_nyelv_gomb(_hu, _en):
+    valtott = dash.ctx.triggered_id
+    if valtott == "flux-nyelv-en":
+        return "en"
+    if valtott == "flux-nyelv-hu":
+        return "hu"
+    return dash.no_update
+
+
+@callback(Output("flux-nyelv","data",allow_duplicate=True),
+    Input("flux-valasz","data"),
+    State("flux-nyelv","data"),
+    prevent_initial_call=True)
+def flux_nyelv_felismeres(valasz, jelenlegi):
+    felismert = (valasz or {}).get("nyelv")
+    if felismert in ("hu", "en") and felismert != jelenlegi:
+        print(f"[FLUX] Kapcsoló átbillentve: {jelenlegi} -> {felismert}", flush=True)
+        return felismert
+    return dash.no_update
 
 
 # ---- Flux: az adatok átadása a böngészőnek ----
 # A gépelést az assets/flux.js végzi saját ütemben. Így az oldal újraépítése
 # (15 mp-es óra, fülváltás) nem szakítja meg és nem kezdi elölről a szöveget.
+# A NYELV is átmegy: ebből tudja a flux.js, hogy a "megnézem az élő adatokat"
+# várakozó sort melyik nyelven írja ki. Enélkül az angolra váltott látogató
+# minden kérdésnél kapott egy magyar mondatot — pont abban a pillanatban,
+# amikor a legjobban figyel.
 app.clientside_callback(
     """
-    function(uzenetek, valasz) {
+    function(uzenetek, valasz, nyelv) {
+        window.FLUX_NYELV = (nyelv === 'en') ? 'en' : 'hu';
         window.FLUX_DATA = {uzenetek: uzenetek || [], valasz: valasz || null};
         if (window.fluxIndit) window.fluxIndit();
         return window.dash_clientside.no_update;
     }
     """,
     Output("flux-noop","data"),
-    [Input("flux-uzenetek","data"),Input("flux-valasz","data")],
+    [Input("flux-uzenetek","data"),Input("flux-valasz","data"),
+     Input("flux-nyelv","data")],
 )
 
 # ---- Flux: azonnali visszajelzés a kérdésre ----
