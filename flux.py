@@ -2006,3 +2006,4 @@ print(
     f" | adatbázis: {'igen' if _db_ok() else 'nem'}",
     flush=True,
 )
+
