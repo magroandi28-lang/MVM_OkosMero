@@ -1925,11 +1925,20 @@ def nyitooldal(nyelv="hu"):
     nyelv = nyelv if nyelv in ("hu", "en") else "hu"
 
     def _nyelv_gomb(kod, felirat):
+        """Egy nyelvválasztó: apró karika + felirat.
+
+        A karika NEM díszítés: ugyanaz a jel, mint a FLUX felirat előtti
+        státuszpötty, csak itt a kiválasztott nyelvet mutatja. Az aktív
+        kitöltött és világít, az inaktív üres, halvány körvonal. Így a
+        kapcsoló az oldal saját vizuális nyelvén beszél, nem hoz be idegen
+        gomb-formát."""
         aktiv = (kod == nyelv)
-        return html.Div(felirat, id=f"flux-nyelv-{kod}", n_clicks=0,
-                        className="flux-nyelv-gomb" + (" aktiv" if aktiv else ""),
-                        title=("Váltás magyarra" if kod == "hu"
-                               else "Switch to English"))
+        return html.Div([
+            html.Span(className="flux-nyelv-potty"),
+            html.Span(felirat),
+        ], id=f"flux-nyelv-{kod}", n_clicks=0,
+           className="flux-nyelv-gomb" + (" aktiv" if aktiv else ""),
+           title=("Váltás magyarra" if kod == "hu" else "Switch to English"))
 
     flux_reteg = html.Div([
         # A fejléc-sor: balra a FLUX-jel, jobbra a HU/EN kapcsoló.
@@ -1941,6 +1950,7 @@ def nyitooldal(nyelv="hu"):
                 html.Div("FLUX",style={"color":"#5b7a92","fontSize":"10px",
                                        "fontWeight":"700","letterSpacing":"3px"})
             ],style={"display":"flex","alignItems":"center","gap":"7px"}),
+            html.Div(className="flux-nyelv-valaszto"),
             html.Div([_nyelv_gomb("hu","HU"), _nyelv_gomb("en","EN")],
                      className="flux-nyelv"),
         ], className="flux-fejlec"),
