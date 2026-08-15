@@ -15,11 +15,19 @@ Ezért itt SOHA nem hívunk `datetime.now()`-t: minden "most" a `_most()`-ból j
 ami budapesti faliórát ad vissza. Enélkül nyáron két órával csúszik a
 "múlt / jövő" szétválasztás, és a napelemes termelés este is "várhatóként"
 jelenik meg, holott már lecsengett.
+
+A KÖSZÖNÉS a szerver dolga, nem a nyelvi modellé. A promptban meg volt adva a
+helyes köszönés, de a modell nem tartotta be: éjfél után is "Jó reggelt!"-tel
+kezdett, és a determinisztikus ág egyáltalán nem köszönt — így a látogató
+kiszámíthatatlannak élte meg. Mostantól a `_koszones_javit()` MINDEN válaszon
+végigfut: levágja a modell saját köszönését, és ha kell, a napszakhoz illőt
+teszi a helyére. Lásd a 7) szakaszt.
 """
 
 import os
 import re
 import json
+import random
 import hashlib
 import threading
 import time
@@ -50,7 +58,7 @@ _TARTALEK_MODELLEK = ["gemini-2.0-flash", "gemini-2.0-flash-lite",
 GEMINI_MODELLEK = list(dict.fromkeys([GEMINI_MODEL] + _TARTALEK_MODELLEK))
 
 SCHEMA_VERSION = 2
-PROMPT_VERSION = "flux-v2"
+PROMPT_VERSION = "flux-v3"
 LANGUAGE = "hu-HU"
 TTL_PERC = 35          # a 30 perces adatfrissítéshez igazítva: egy adatállapot
                        # = egy Gemini-hívás, utána tárolt szöveg megy ki
@@ -61,14 +69,18 @@ GEMINI_TIMEOUT = 12         # a főoldali szöveghez (háttérben készül)
 # Alapból NEM. A főoldali mondatokat a `sablon_uzenetek()` állítja elő, szintén
 # az élő adatokból, napszakhoz igazított igeidővel — csak állandóbb szerkezettel,
 # mint a Gemini. Cserébe a napi keret TELJES EGÉSZE a látogatók kérdéseire marad,
-# oda, ahol a nyelvi modell tényleg számít. Adatállapotonként egy hívás naponta
-# 40-50 kérést jelentene úgy, hogy közben senki nem kérdezett semmit.
+# oda, ahol a nyelvi modell tényleg számít.
 # Ha valaki mégis a Geminire bízná a főoldalt: FLUX_FOOLDAL_GEMINI=1
 FOOLDAL_GEMINI = os.environ.get("FLUX_FOOLDAL_GEMINI", "0") == "1"
 GEMINI_KERDES_TIMEOUT = 10  # a látogató kérdéséhez. Ez FELSŐ KORLÁT, nem
                             # várakozási idő: a modell rendszerint 2-4 mp
-                            # alatt felel. Szorosabb korlátnál egy amúgy jó,
-                            # épp elkészülő választ dobnánk el feleslegesen.
+                            # alatt felel.
+
+# A kérdésekre adott válasz hőfoka. 0,7-ről 0,85-re emelve: a szám-ellenőrzés
+# amúgy is kiszűr minden kitalált értéket, tehát a magasabb hőfok NEM a
+# pontosság rovására megy — csak a mondatszerkezet lesz változatosabb. A régi
+# beállítás mellett a válaszok szerkezete gyakorlatilag mindig ugyanaz volt.
+GEMINI_KERDES_HOFOK = 0.85
 
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
@@ -142,6 +154,11 @@ FLUX_SZEREP = (
 # A fenti szerep szándékosan szikár — jelentést ír, nem beszélget. Emiatt a
 # válaszok gépiesnek hatottak: se megszólítás, se reakció a kérdésre, csak egy
 # tőmondat adatokkal. A szám-szabály ugyanaz marad, a hang viszont emberi.
+#
+# A KÖSZÖNÉST innen kivettük. Nem azért, mert nem kell, hanem mert a modell
+# nem tartotta be: éjfél után is "Jó reggelt!"-tel kezdett, hiába állt a
+# promptban a helyes alak. Amit nem lehet betartatni, azt nem a modellre
+# bízzuk — a köszönést mostantól a `_koszones_javit()` teszi a helyére.
 FLUX_SZEREP_KERDES = (
     "Te vagy Flux, az OkosMérő energiaasszisztense. Egy látogató most kérdezett "
     "tőled az oldalon. Úgy válaszolj, mint egy segítőkész, jókedvű szakértő kolléga, "
@@ -153,10 +170,12 @@ FLUX_SZEREP_KERDES = (
     "3) egy rövid, hasznos hozzáfűzés vagy felajánlás, hogy mit nézhet még meg.\n"
     "HA A KÉRDÉS TÖBB DOLGOT is firtat, MINDEGYIKRE válaszolj — ne csak az "
     "elsőre. Ha az egyikhez nincs adat, azt az egyet mondd meg őszintén.\n"
-    "KÖSZÖNÉS: csak akkor köszönj vissza, ha a látogató maga is köszön, VAGY ha "
-    "a prompt kifejezetten jelzi, hogy ez az első kérdése. Minden válaszot "
-    "'Szia!'-val kezdeni modoros — a felütés legyen változatos és a kérdéshez "
-    "illő, vagy maradjon el.\n"
+    "KÖSZÖNÉS: SOHA ne kezdd a választ köszönéssel — se 'Szia', se 'Jó reggelt', "
+    "se 'Jó napot', se 'Üdv'. A köszönést a rendszer illeszti a válasz elé, ha "
+    "kell. Te rögtön a tartalommal kezdj.\n"
+    "VÁLTOZATOSSÁG: ne minden válasz ugyanazzal a szerkezettel induljon. "
+    "Hol a számmal kezdj, hol a kérdésre adott reakcióval, hol egy rövid "
+    "megfigyeléssel — úgy, ahogy egy ember beszélne.\n"
     "Vedd figyelembe a napszakot: hajnalban ne úgy írj, mintha dél lenne.\n"
     "SZAKMAI SZABADSÁG: a témán BELÜL nyugodtan légy tartalmas és önálló. "
     "Beszélhetsz arról, mi mozgatja most a magyar és európai energiapiacot, miért "
@@ -180,10 +199,6 @@ FLUX_SZEREP_KERDES = (
 # a Gemini-változat végére is. Ezek hívják körbe a látogatót az oldalon.
 # A modellek bemutatása. Ezek NEM élő adatok, hanem a dokumentált,
 # offline validált eredmények — ezért fix szövegek, nem a Gemini írja.
-# Ebből a nyolc statikus mondatból eredetileg mind a nyolc benne forgott a
-# körben, az öt-hat élő megállapítás mellett. Így a látogató idejének majdnem
-# a felében bemagolt, adat nélküli szöveget olvasott — ettől hatott
-# élettelennek az egész. Kettő-kettő maradt, a többi kikerült.
 MODELL_UZENETEK = [
     {"sor": "Az OkosMérő két külön módszert használ: a CatBoost gépi tanulási modell "
             "előrejelzi a várható fogyasztást, az STL pedig megkeresi a szokatlan "
@@ -422,10 +437,10 @@ def tenyek(data, ajanlas=None):
         }
 
     # ---------- Megújulók: MA és HOLNAP külön ----------
-    # Ez volt a hibás rész. A `fc_nap` sorozat a célablak végéig tart, ami
-    # 14:00 után átnyúlik a HOLNAPI napra. Ha ezen egyben veszünk maximumot,
-    # este a HOLNAPI déli csúcs jelenik meg "ma még várható" értékként.
-    # Ezért minden órát a saját dátuma szerint sorolunk be.
+    # A `fc_nap` sorozat a célablak végéig tart, ami 14:00 után átnyúlik a
+    # HOLNAPI napra. Ha ezen egyben veszünk maximumot, este a HOLNAPI déli
+    # csúcs jelenik meg "ma még várható" értékként. Ezért minden órát a saját
+    # dátuma szerint sorolunk be.
     meg = data.get("megujulo") or {}
     if meg.get("fc_nap") and meg.get("fc_szel"):
         idok = meg.get("ido") or []
@@ -435,8 +450,7 @@ def tenyek(data, ajanlas=None):
 
         # (időbélyeg, érték) párokat tartunk, mert a csúcs ÓRÁJA is kell:
         # "13:00 körül tetőzik" hajnali egykor is értelmes mondat, a
-        # "nap hátralévő részében várható" viszont ilyenkor képtelenség —
-        # hajnali egykor az egész nap hátravan.
+        # "nap hátralévő részében várható" viszont ilyenkor képtelenség.
         ma_nap, ma_szel = [], []            # mai óra, jóslat
         jovo_nap, jovo_szel = [], []        # mai óra, még hátra van
         mult_nap = []                       # mai óra, már elmúlt
@@ -582,24 +596,19 @@ _MEMO_LOCK = threading.Lock()
 _MEMO_MAX = 32
 
 # ---- Kvóta-védelem ----
-# Ha egyszerre többen nyitják meg az oldalt (pl. egy elküldött pályázat után),
-# a Gemini ingyenes kerete percek alatt kimerülhet. Onnantól minden hívás
-# 429-cel jön vissza — de mindegyik VÁRAKOZÁSSAL, tehát a látogató úgy éli
-# meg, hogy Flux lassú és néma. Ezért az első kvóta-hiba után egy ideig
-# meg sem próbáljuk: a determinisztikus válasz azonnal megy ki.
+# Ha egyszerre többen nyitják meg az oldalt, a Gemini ingyenes kerete percek
+# alatt kimerülhet. Onnantól minden hívás 429-cel jön vissza — de mindegyik
+# VÁRAKOZÁSSAL, tehát a látogató úgy éli meg, hogy Flux lassú és néma. Ezért
+# az első kvóta-hiba után egy ideig meg sem próbáljuk.
 _KVOTA_LOCK = threading.Lock()
 _KVOTA_TILTAS_PERC = 10
 # Modellenként külön tiltás: ha az egyik kerete betelt, a másiké még élhet.
 _kvota_tiltva_eddig = {}
 
-# A főoldali szöveg legyártása egyszerre csak EGY szálon fusson. Enélkül
-# öt egyidejű látogató öt külön Gemini-hívást indítana ugyanarra az
-# adatállapotra — ötszörös kvótafogyasztás ugyanazért az eredményért.
+# A főoldali szöveg legyártása egyszerre csak EGY szálon fusson.
 _GYARTAS_LOCK = threading.Lock()
 
-# A kérdésekre adott válaszok is gyorsítótárba kerülnek. Több látogató
-# jellemzően ugyanazt kérdezi ("mit tudsz?", "mennyi az ár?"), ezért ez
-# érdemben csökkenti a hívások számát.
+# A kérdésekre adott válaszok is gyorsítótárba kerülnek.
 _VALASZ_MEMO = {}
 _VALASZ_MEMO_MAX = 64
 _VALASZ_TTL = 600
@@ -632,10 +641,9 @@ def _elerheto_modellek():
 
 
 def _frissit_koszonto(uzenetek):
-    """A köszöntőben PERCRE PONTOS óra van, a gyorsítótár viszont 35 percig él.
-    Emiatt hajnali fél háromkor még az egy órakor legyártott mondat ment ki
-    ("Most 01:55 van"), és jogosan tűnt úgy, hogy Flux nem tudja, hány óra van.
-    A tárolt szöveg első eleme ezért mindig frissen készül."""
+    """A köszöntő a NAPSZAKHOZ igazodik, a gyorsítótár viszont 35 percig él.
+    A tárolt szöveg első eleme ezért mindig frissen készül — így a napszakhatár
+    átlépésekor sem marad kint a régi köszönés."""
     if not uzenetek:
         return uzenetek
     elso = uzenetek[0]
@@ -762,10 +770,7 @@ def _ezres(x, tizedes=0):
 def _nap_mondat(mg):
     """A napelemes termelés mondata — a NAPSZAKHOZ igazítva.
 
-    A korábbi szöveg minden órában azt írta, hogy "a nap hátralévő részében
-    várható". Hajnali egykor ez képtelenség: olyankor az egész nap hátravan,
-    a mondat mégis úgy hangzik, mintha a nap már félig eltelt volna. Ezért a
-    csúcs ÓRÁJA kerül a mondatba, és három eset van:
+    Három eset van:
       - a csúcs még hátravan   -> "13:00 körül tetőzik"
       - a csúcs elmúlt, de van még termelés -> tetőzés múlt időben + hátralévő
       - a termelés lecsengett  -> kizárólag múlt idő, a holnapi terv külön
@@ -780,8 +785,7 @@ def _nap_mondat(mg):
         cs = _ezres(tetoz)
         ido = _ido(mg.get("nap_mai_tetozes_ido") or mg.get("nap_mai_csucs_ido"))
         sor = f"A mai napelemes termelés lecsengett; a tetőzés {ido} körül {cs} MW volt."
-        # A holnapi terv KÜLÖN mondatban, egyértelmű címkével — sosem
-        # keveredhet össze a mai értékkel.
+        # A holnapi terv KÜLÖN mondatban, egyértelmű címkével.
         if mg.get("nap_holnapi_csucs_mw"):
             sor += (f" Holnapra a napelőtti terv "
                     f"{_ezres(mg['nap_holnapi_csucs_mw'])} MW körüli csúcsot jelez.")
@@ -826,27 +830,21 @@ def _tegnap_mondat(f):
         sor += (f" A mai nap eddigi átlaga {abs(atl):.0f} százalékkal "
                 f"{'magasabb' if atl > 0 else 'alacsonyabb'}, mint tegnap ugyaneddig.")
     # A kiemelt szám és a mondat NEM mondhat mást. 0,76%-nál a mondat azt írja,
-    # hogy "gyakorlatilag ugyanannyi", a `+.0f` viszont +1%-ra kerekített —
-    # a kártyán így egymásnak ellentmondó két állítás állt. Egy százalék alatt
-    # ezért tizedesjeggyel írjuk ki (magyar tizedesvesszővel).
+    # hogy "gyakorlatilag ugyanannyi", a `+.0f` viszont +1%-ra kerekített.
     if abs(sz) < 0.05:
-        szam = "0%"                       # gyakorlatilag azonos: ne "+0,0%" álljon ott
+        szam = "0%"
     elif abs(sz) < 1:
         szam = f"{sz:+.1f}%".replace(".", ",")
     else:
         szam = f"{sz:+.0f}%"
-    # A címke rövid: a hosszabb változat ("eltérés a tegnapi azonos órától")
-    # nem fér ki a kártyára, és a végén levágódott.
     return {"sor": sor, "szam": szam, "cimke": "eltérés tegnaphoz"}
 
 
 def _ho_mondat(ho, f):
     """A hőmérséklet mondata a HŐMÉRSÉKLETHEZ igazítva.
 
-    A korábbi szöveg minden esetben a "hűtési igényen keresztül" fordulatot
-    használta — éjjel, 12 fokban is. A hűtés csak melegben magyarázat, a fűtés
-    csak hidegben; a kettő között egyik sem, ilyenkor a napi szélsőértékek
-    mondanak többet."""
+    A hűtés csak melegben magyarázat, a fűtés csak hidegben; a kettő között
+    egyik sem, ilyenkor a napi szélsőértékek mondanak többet."""
     ido = f.get("idojaras") or {}
     if ho >= 24:
         sor = (f"A budapesti mért hőmérséklet most {ho:.0f} °C; ezen a szinten a hűtés "
@@ -864,13 +862,7 @@ def _ho_mondat(ho, f):
 
 
 def _szel_mondat(mg):
-    """A széltermelés mondata — azzal kezdve, ami MÉG ELŐTTÜNK VAN.
-
-    A korábbi változat mindig a napi csúccsal indított. Éjfél után ez
-    értelmetlenné vált: hajnali negyed egykor azt írta, hogy "a mai termelés
-    00:00 körül tetőzött" — a nap tizenöt perce tartott, a mondat mégis úgy
-    hangzott, mintha az egész nap lezajlott volna. A hasznos információ az,
-    hogy a hátralévő órákban mi várható; a napi csúcs ehhez csak háttér."""
+    """A széltermelés mondata — azzal kezdve, ami MÉG ELŐTTÜNK VAN."""
     if not mg or mg.get("szel_mai_csucs_mw") is None:
         return None
 
@@ -923,14 +915,10 @@ def sablon_uzenetek(f):
     if fo and fo.get("elorejelzett_csucs_mwh"):
         csucs = _ezres(fo["elorejelzett_csucs_mwh"])
         if fo.get("aktualis_ora_mwh"):
-            # A látogatót elsősorban az érdekli, MOST mit mond a modell. A napi
-            # csúcs csak akkor kerül előre, ha még hátravan; éjjel a már elmúlt
-            # csúcsot előretenni félrevezető volt.
             akt = _ezres(fo["aktualis_ora_mwh"])
             sor = (f"A CatBoost modell a most futó órára {akt} MWh országos "
                    f"fogyasztást jelez.")
-            # Az `_ora_sav` maga kiírja a "holnap" szót, ha az időpont nem mai —
-            # ezért a "holnapi" jelzőt csak akkor tesszük ki, ha ott nem hangzik el.
+            # Az `_ora_sav` maga kiírja a "holnap" szót, ha az időpont nem mai.
             nap_szo = "A mai csúcs" if fo.get("csucs_ma_van") else "A csúcs"
             if fo.get("csucs_meg_hatravan"):
                 sor += (f" {nap_szo} {_ora_sav(fo['csucs_idopont'])} között "
@@ -1021,9 +1009,7 @@ def sablon_uzenetek(f):
 class GeminiKvotaHiba(RuntimeError):
     """Elfogyott a nyelvi modell kerete (HTTP 429 / RESOURCE_EXHAUSTED).
 
-    Ez nem programhiba, hanem átmeneti állapot: a keret idővel újratöltődik.
-    Ezért külön típus — a látogatónak őszintén megmondjuk, ahelyett hogy
-    Flux csak szűkszavúbbá válna minden magyarázat nélkül."""
+    Ez nem programhiba, hanem átmeneti állapot: a keret idővel újratöltődik."""
 
 
 class GeminiLassuHiba(RuntimeError):
@@ -1031,12 +1017,7 @@ class GeminiLassuHiba(RuntimeError):
 
 
 def _gemini(prompt, sema, timeout=GEMINI_TIMEOUT, szerep=None, homerseklet=0.4):
-    """Végigpróbálja az elérhető modelleket, amíg valamelyik válaszol.
-
-    Minden modellnek KÜLÖN ingyenes kerete van. Ha csak egyet használnánk,
-    annak kimerülésével Flux azonnal elnémulna nyelvileg — pedig a következő
-    modell keretéből még bőven van. Aminek betelt a kerete, azt egy ideig
-    átugorjuk, hálózati hívás nélkül."""
+    """Végigpróbálja az elérhető modelleket, amíg valamelyik válaszol."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY nincs beállítva")
     elerheto = _elerheto_modellek()
@@ -1075,10 +1056,6 @@ def _gemini_egy(modell, prompt, sema, timeout, szerep, homerseklet):
     except requests.exceptions.Timeout as e:
         raise GeminiLassuHiba(f"{modell} időtúllépés ({timeout} mp)") from e
     if r.status_code != 200:
-        # A Google a hiba OKÁT a válasz törzsében küldi (rossz kulcs, nem
-        # létező modellnév, kimerült kvóta). A puszta `raise_for_status()`
-        # ezt eldobta, ezért a naplóban csak egy szám látszott, és nem
-        # lehetett megmondani, miért hallgat Flux.
         torzs = r.text[:400]
         if r.status_code == 429 or "RESOURCE_EXHAUSTED" in torzs:
             _kvota_jelez(modell)
@@ -1152,8 +1129,7 @@ def _engedelyezett_szamok(f):
                 bejar(v)
         elif isinstance(x, bool):
             # Pythonban a True `int`-nek is számít. Enélkül minden logikai
-            # mező beengedte volna az 1-et az elfogadott számok közé, vagyis
-            # egy kitalált "1 €/MWh" is átment volna az ellenőrzésen.
+            # mező beengedte volna az 1-et az elfogadott számok közé.
             return
         elif isinstance(x, (int, float)):
             ki.add(round(float(x), 1))
@@ -1199,15 +1175,14 @@ def uzenetek(data, ajanlas=None, koszonto=None):
         return [{"sor": "Élő adatokra várok — amint megérkeznek, mondom, mi történik.",
                  "szam": None, "cimke": None}]
 
-    # Alapertelmezesben elo koszonto keszul: napszak szerinti koszones es a
-    # pontos ido. A hivo felulirhatja sajat szoveggel.
+    # Alapertelmezesben elo koszonto keszul: napszak szerinti koszones.
+    # A hivo felulirhatja sajat szoveggel.
     koszonto = koszonto or elo_koszonto()
 
     tartalek = sablon_uzenetek(f) + MODELL_UZENETEK + ZARO_UZENETEK
     if koszonto:
         # A "kezdo" jelzés miatt a böngésző a köszöntőt EGYSZER játssza le,
-        # utána kihagyja a körből. Eddig minden fordulóban újrakezdte a
-        # "Szia, Flux vagyok..." mondattal, ami ismétlődőnek és gépiesnek hatott.
+        # utána kihagyja a körből.
         tartalek[0] = {"sor": koszonto, "szam": None, "cimke": None, "kezdo": True}
 
     fh = _hash(f)
@@ -1229,10 +1204,7 @@ def uzenetek(data, ajanlas=None, koszonto=None):
         except Exception as e:
             print(f"[FLUX] Gyorsítótár olvasás: {e}", flush=True)
 
-    # Egyszerre csak egy szál gyárt. A zár NEM várakozó: ha épp más látogató
-    # hívása fut, ez a látogató azonnal megkapja a determinisztikus szöveget,
-    # ahelyett hogy akár 12 másodpercet várna valaki más Gemini-hívása mögött.
-    # A következő oldalletöltés már a kész, gazdagabb változatot kapja.
+    # Egyszerre csak egy szál gyárt. A zár NEM várakozó.
     if not _GYARTAS_LOCK.acquire(blocking=False):
         return tartalek
     try:
@@ -1333,7 +1305,75 @@ def _gyart(f, ck, fh, minoseg, koszonto, tartalek):
 
 
 # ============================================================
-# 7) A LÁTOGATÓ KÉRDÉSE
+# 7) A KÖSZÖNÉS — a szerver dolga, nem a modellé
+#
+# Két baj volt vele, és mindkettő ugyanabból fakadt: rábíztuk a nyelvi
+# modellre.
+#
+#   1) Éjfél után "Jó reggelt!". A prompt megmondta a helyes alakot
+#      (hajnalban "Szia!"), de a modell nem tartotta be. Amit nem lehet
+#      betartatni, azt nem a modellre bízzuk.
+#
+#   2) Kiszámíthatatlan köszönés. Két helyről jöhet válasz: a Geminitől
+#      (az köszönt) és a determinisztikus `_sajat_valasz`-tól (az soha).
+#      Ha a Gemini kerete betelt vagy lassú volt, csendben átváltottunk a
+#      másikra — a látogató szempontjából Flux hol köszönt, hol nem.
+#
+# Mostantól egyetlen szabály van, MINDKÉT ágon: a modell köszönését levágjuk,
+# és ha ez a látogató első kérdése, a napszakhoz illő köszönést mi tesszük elé.
+# ============================================================
+
+# A magyar köszönések a válasz ELEJÉN. Toldalékkal, vesszővel, felkiáltójellel
+# és a gyakori "Szia, Andi!" formával is — a névvel együtt levágjuk.
+_KOSZONES_RE = re.compile(
+    r"^\s*(?:jó\s+reggelt(?:\s+kívánok)?|jó\s+napot(?:\s+kívánok)?|"
+    r"jó\s+estét(?:\s+kívánok)?|jó\s+éjszakát|jó\s+délutánt|"
+    r"szervusz|szia(?:sztok)?|hell?ó|hello|hali|heló|"
+    r"üdvözöllek|üdvözlöm|üdv|csá|cső|szeva)"
+    # A megszólítás is ide tartozik: a "Szia, Andi!" nevét egyben vágjuk le a
+    # köszönéssel. Enélkül "Andi! A csúcs..." maradt volna a mondat elején —
+    # ami rosszabb, mint az eredeti köszönés. Csak EGY nagybetűs szó eshet ide,
+    # így a "Szia, a mai ár..." folytatásba nem harap bele.
+    r"(?:\s*,\s*[A-ZÁÉÍÓÖŐÚÜŰ][\wáéíóöőúüű]{1,14})?"
+    r"[\s,!.…-]*",
+    re.IGNORECASE,
+)
+
+
+def _koszones_levag(sor):
+    """Levágja a mondat elejéről a köszönést, és nagybetűsíti a maradékot.
+
+    Ha a köszönés levágása után nem maradna semmi, az eredeti mondat megy
+    vissza — nem csinálunk üres választ."""
+    if not sor:
+        return sor
+    m = _KOSZONES_RE.match(sor)
+    if not m:
+        return sor
+    torzs = sor[m.end():].lstrip()
+    if not torzs:
+        return sor
+    return torzs[0].upper() + torzs[1:]
+
+
+def _koszones_javit(u, mar_koszont):
+    """A válasz köszönésének egységesítése.
+
+    `mar_koszont=True`  -> a látogató már járt itt ebben a munkamenetben:
+                           minden köszönés lekerül, rögtön a lényeggel kezdünk.
+    `mar_koszont=False` -> ez az első kérdése: a modell saját köszönését
+                           levágjuk, és a NAPSZAKHOZ ILLŐT tesszük elé.
+    """
+    if not u or not u.get("sor"):
+        return u
+    torzs = _koszones_levag(u["sor"])
+    ki = dict(u)
+    ki["sor"] = torzs if mar_koszont else f"{_udvozles()} {torzs}"
+    return ki
+
+
+# ============================================================
+# 8) A LÁTOGATÓ KÉRDÉSE
 #
 # Alapelv: Flux SOHA ne hallgasson el. Először determinisztikus, az élő
 # adatokból számolt választ állítunk elő a kérdés témájára — ez akkor is
@@ -1349,10 +1389,10 @@ def _u(sor, szam=None, cimke=None):
 # Témák: (kulcsszavak, kezelő függvény neve). A sorrend számít — az első
 # egyező téma nyer, ezért a specifikusabb kulcsszavak állnak elöl.
 def _t_udvozles(f):
-    """Ha a látogató köszön vagy megszólít, Flux visszaköszön — napszak
-    szerint —, és rögtön felajánl valamit, amiről kérdezhet."""
+    """Ha a látogató köszön vagy megszólít, Flux visszaköszön — a köszönést
+    itt NEM tesszük bele, azt a `_koszones_javit()` illeszti a helyére."""
     kep = _t_kepessegek(f)
-    sor = f"{_udvozles()} Örülök, hogy benéztél. "
+    sor = "Örülök, hogy benéztél. "
     if kep:
         sor += kep["sor"]
     else:
@@ -1361,8 +1401,12 @@ def _t_udvozles(f):
 
 
 def _t_koszonom(f):
-    return _u("Szívesen! Ha bármi mást is meg akarsz nézni, csak kérdezz.",
-              None, None)
+    return _u(random.choice([
+        "Szívesen! Ha bármi mást is meg akarsz nézni, csak kérdezz.",
+        "Nagyon szívesen — szólj, ha másra is kíváncsi vagy.",
+        "Szívesen. Bármikor kérdezhetsz az árakról, a fogyasztásról vagy a "
+        "megújulókról.",
+    ]), None, None)
 
 
 def _t_kepessegek(f):
@@ -1636,12 +1680,10 @@ def _t_frissites(f):
     return _u(sor, None, "adatfrissítés")
 
 
-# A sorrend számít: a specifikusabb minta áll elöl.
 # TÁRSALGÁSI témák. Ezek KÜLÖN listában vannak, és csak akkor kerülnek sorra,
 # ha egyetlen ÉRDEMI téma sem talált. Amíg egy listában voltak, a "Szia,
 # mennyi az ár?" kérdésre Flux csak visszaköszönt és felsorolta, mit tud —
-# mert a köszönés hamarabb illeszkedett, mint az ár. A köszönés soha nem
-# nyomhatja el az igazi kérdést.
+# mert a köszönés hamarabb illeszkedett, mint az ár.
 _TARSALGAS = [
     (("köszönöm", "köszi", "kösz ", "hálás"), _t_koszonom),
     (("szia", "helló", "hello", "hali", "jó reggelt", "jó estét", "jó napot",
@@ -1681,16 +1723,28 @@ _TEMAK = [
 
 
 # Rövid, emberi felütések. Nem díszítés: enélkül minden válasz ugyanazzal a
-# szikár adatmondattal indul, és Flux úgy hat, mint egy kijelzőtábla. A
-# sorrend körbejár, hogy ne ugyanaz jöjjön minden kérdésre.
+# szikár adatmondattal indul, és Flux úgy hat, mint egy kijelzőtábla.
+#
+# A régi változat ÖT felütést használt, KÖRBEN. Öt kérdés után tehát pontosan
+# ugyanaz jött vissza, ugyanabban a sorrendben — a látogató ezt hamar
+# észreveszi, és pont az ellenkezőjét éri el annak, amiért bekerült. Több
+# változat, véletlen sorrendben, és a legutóbbit kihagyjuk, hogy ne
+# ismétlődjön kétszer egymás után.
 _FELUTESEK = [
     "Nézzük. ",
     "Épp jókor kérded. ",
     "Megnéztem az élő adatokat. ",
     "Erre tudok válaszolni. ",
     "Máris. ",
+    "Jó kérdés. ",
+    "Rögtön megnézem. ",
+    "Erre pont van friss adatom. ",
+    "Mindjárt mondom. ",
+    "Épp erről beszélnek a mai számok. ",
+    "Egy pillanat, itt van. ",
+    "Erre könnyű válaszolni. ",
 ]
-_felutes_szamlalo = {"i": 0}
+_utolso_felutes = {"szoveg": None}
 
 
 def _felutessel(u):
@@ -1698,13 +1752,14 @@ def _felutessel(u):
     Gemini a saját szerepéből amúgy is így fogalmaz."""
     if not u or not u.get("sor"):
         return u
-    # A köszönésre és a köszönetre adott válasz már eleve személyes.
-    if u["sor"].startswith(("Jó ", "Szia", "Szívesen", "Most ")):
+    # A köszönetre és az időpontra adott válasz már eleve személyes.
+    if u["sor"].startswith(("Szívesen", "Nagyon szívesen", "Örülök", "Most ")):
         return u
-    i = _felutes_szamlalo["i"] % len(_FELUTESEK)
-    _felutes_szamlalo["i"] += 1
+    jeloltek = [x for x in _FELUTESEK if x != _utolso_felutes["szoveg"]]
+    felutes = random.choice(jeloltek or _FELUTESEK)
+    _utolso_felutes["szoveg"] = felutes
     ki = dict(u)
-    ki["sor"] = _FELUTESEK[i] + u["sor"]
+    ki["sor"] = felutes + u["sor"]
     return ki
 
 
@@ -1740,8 +1795,7 @@ def _illeszkedik(k, minta):
     Az "ár" három betűje ott van a "vacsorára", a "határ" és a "január" szóban
     is — puszta részszöveg-kereséssel a "receptet vacsorára" energiakérdésnek
     minősült volna. Négy karakternél rövidebb mintánál ezért szó eleji egyezést
-    követelünk meg; a hosszabbak (magyar toldalékolás miatt) maradnak
-    részszövegnek."""
+    követelünk meg."""
     if len(minta) >= 4:
         return minta in k
     return re.search(r"(?<!\w)" + re.escape(minta), k) is not None
@@ -1814,7 +1868,8 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
 
     Sorrend: (1) determinisztikus válasz a témára, (2) Gemini, ha átmegy az
     ellenőrzésen, (3) ha a téma sem talált, elmondjuk, miről tudunk beszélni.
-    Kivételt sosem dob."""
+    A köszönést MINDEN ágon a `_koszones_javit()` egységesíti, hogy a látogató
+    ne érezze kiszámíthatatlannak. Kivételt sosem dob."""
     f, _ = tenyek(data, ajanlas)
     if f is None:
         return _u("Élő adatokra várok — amint megérkeznek, válaszolok a kérdésedre.")
@@ -1826,12 +1881,11 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
     # 0/a) Témán kívüli kérdés: a modellt el sem érjük, így keretet sem fogyaszt.
     if _teman_kivul(kerdes):
         print(f"[FLUX] Témán kívüli kérdés: {str(kerdes)[:80]!r}", flush=True)
-        return _elharitas(f)
+        return _koszones_javit(_elharitas(f), mar_koszont)
 
     # 0/b) Ugyanarra a kérdésre, ugyanabban az adatállapotban ne hívjuk újra a
-    # modellt. Több látogató jellemzően ugyanazt kérdezi, és a kvóta közös.
-    # A köszönés-jelző is a kulcs része: különben az első látogatónak készült,
-    # köszönéssel kezdődő válasz menne ki annak is, aki már régóta itt van.
+    # modellt. A köszönés-jelző is a kulcs része: különben az első látogatónak
+    # készült, köszönéssel kezdődő válasz menne ki annak is, aki már régóta itt van.
     valasz_kulcs = (f"{_hash(f)}:{int(bool(mar_koszont))}:"
                     f"{' '.join(str(kerdes).lower().split())[:120]}")
     tarolt = None
@@ -1848,27 +1902,20 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
     biztos = _sajat_valasz(kerdes, f)
     if biztos is None and kontextus:
         # "És ez?" — a kérdés a képernyőn olvasott mondatra utal vissza.
-        # Ilyenkor a téma AZ olvasott mondatból derül ki, nem a kérdésből.
         biztos = _sajat_valasz(kontextus, f)
     if biztos is None:
         # Naplózzuk, mire nem találtunk témát — ebből bővíthető a kulcsszólista.
         print(f"[FLUX] Nem talált témát a kérdésre: {str(kerdes)[:120]!r}", flush=True)
 
     # 2) A Gemini csak akkor kerül a helyére, ha valóban jobb és hiteles.
-    # Ha átmeneti okból (kvóta, lassúság) nem sikerül, ezt a látogató is
-    # megtudja — a válasz elé kerül egy rövid, őszinte mondat.
     elonezet = ""
     try:
         meta = f.get("_meta") or {}
         prompt = (
             f"Most {meta.get('helyi_ido')} van Budapesten, tehát "
             f"{meta.get('napszak')} van. Ehhez igazítsd a hangnemet és az igeidőket.\n"
-            # A napszak megnevezése nem elég: a modell a "hajnal" szóból
-            # hajnali negyed egykor is "Jó reggelt!"-re következtetett. Ezért
-            # a KÖSZÖNÉST magát adjuk meg, és megtiltjuk a sajátot.
-            f"Ha köszönsz, KIZÁRÓLAG ezt használd: \"{_udvozles()}\". "
-            f"Más köszönést NE írj — hajnalban a \"Jó reggelt\" és a "
-            f"\"Jó napot\" egyaránt hibás.\n\n"
+            "NE köszönj a válasz elején — sem 'Szia', sem 'Jó reggelt', sem más "
+            "köszönés. A köszönést a rendszer illeszti oda, ha kell.\n\n"
             "Élő adatok:\n"
             f"{json.dumps(f, ensure_ascii=False, default=str)}\n\n"
             + (f"A látogató ÉPPEN EZT a megállapítást olvasta a képernyőn, "
@@ -1876,11 +1923,6 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
                f"Ha a kérdés visszautal rá ('ez', 'erről', 'miért'), erre "
                f"vonatkozik.\n\n" if kontextus else "")
             + f"A látogató kérdése: {str(kerdes).strip()[:300]}\n\n"
-            + ("A látogató MÁR JÁRT itt ebben a munkamenetben, tehát NE köszönj "
-               "újra, hanem rögtön a lényeggel kezdj.\n"
-               if mar_koszont else
-               "Ez a látogató ELSŐ kérdése ebben a munkamenetben — egy rövid "
-               "köszönés belefér.\n")
             + "Válaszolj EGY elemmel a megadott formában. A 'sor' a beszélgető "
             "válasz (2-4 mondat), a 'szam' egyetlen kiemelt érték mértékegységgel "
             "az adatokból, a 'cimke' 2-5 szóban megmondja, mi az a szám. "
@@ -1896,11 +1938,15 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
             "TÉNYLEG nincs mező az adatokban."
         )
         v = _gemini(prompt, _UZENET_SEMA, timeout=GEMINI_KERDES_TIMEOUT,
-                    szerep=FLUX_SZEREP_KERDES, homerseklet=0.7)
+                    szerep=FLUX_SZEREP_KERDES, homerseklet=GEMINI_KERDES_HOFOK)
         jo, hibak = _ellenoriz(v.get("uzenetek", [])[:1], f)
         if jo:
-            _valasz_memo_ir(valasz_kulcs, jo[0])
-            return jo[0]
+            # A modell köszönését levágjuk, és ha kell, a NAPSZAKHOZ ILLŐT
+            # tesszük elé. Ez az a pont, ahol az éjfél utáni "Jó reggelt!"
+            # végleg megszűnik: nem kérjük a modelltől, hanem mi tesszük oda.
+            kesz = _koszones_javit(jo[0], mar_koszont)
+            _valasz_memo_ir(valasz_kulcs, kesz)
+            return kesz
         print(f"[FLUX] Kérdés elbukott az ellenőrzésen: {hibak}", flush=True)
     except GeminiKvotaHiba as e:
         # Ez nem hiba, hanem átmeneti állapot — a látogató megérdemli, hogy
@@ -1911,9 +1957,8 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
                     "Az adatok viszont ugyanúgy élők: ")
     except GeminiLassuHiba as e:
         # Az időtúllépés MÚLÉKONY: a következő kérdésnél már rendben lehet.
-        # Ilyenkor nem magyarázkodunk a látogatónak, egyszerűen válaszolunk a
-        # saját, adatból számolt mondattal — az is pontos. A naplóba viszont
-        # bekerül, hogy lássuk, ha sűrűsödik.
+        # Ilyenkor nem magyarázkodunk, egyszerűen válaszolunk a saját, adatból
+        # számolt mondattal — az is pontos.
         print(f"[FLUX] Kérdés — lassú: {e}", flush=True)
     except Exception as e:
         print(f"[FLUX] Kérdés: {e}", flush=True)
@@ -1924,24 +1969,30 @@ def valasz(kerdes, data, ajanlas=None, kontextus=None, mar_koszont=False):
             # A magyarázó mondat után a saját mondat kisbetűvel folytatódik.
             sor = biztos["sor"]
             biztos["sor"] = elonezet + (sor[0].lower() + sor[1:] if sor else sor)
-        else:
-            # Csak a "tiszta" választ tesszük el. A kvóta- vagy lassúság-jelzés
-            # átmeneti állapotot ír le, azt nem szabad 10 percre bebetonozni.
-            _valasz_memo_ir(valasz_kulcs, biztos)
-        return biztos
+            return _koszones_javit(biztos, mar_koszont)
+        # A determinisztikus ág is köszön, ha ez az első kérdés — enélkül a
+        # látogató attól függően kapott köszönést, hogy épp élt-e a Gemini
+        # kerete. Ez volt a "néha köszön, néha nem" oka.
+        kesz = _koszones_javit(biztos, mar_koszont)
+        # Csak a "tiszta" választ tesszük el. A kvóta-jelzés átmeneti
+        # állapotot ír le, azt nem szabad 10 percre bebetonozni.
+        _valasz_memo_ir(valasz_kulcs, kesz)
+        return kesz
 
     # 3) Nem találtunk témát: ne egy üres "nem tudom" menjen ki, hanem az,
     # hogy pontosan miről lehet kérdezni ebben a pillanatban.
     kepessegek = _t_kepessegek(f)
     if kepessegek:
-        return _u("Erre a kérdésre az élő adatokból nem tudok pontos választ adni. "
-                  + kepessegek["sor"], None, "amiről kérdezhetsz")
-    return _u("Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre pontos "
-              "válasz.")
+        return _koszones_javit(
+            _u("Erre a kérdésre az élő adatokból nem tudok pontos választ adni. "
+               + kepessegek["sor"], None, "amiről kérdezhetsz"), mar_koszont)
+    return _koszones_javit(
+        _u("Erre a kérdésre az élő adatokból jelenleg nem áll rendelkezésre pontos "
+           "válasz."), mar_koszont)
 
 
 # ============================================================
-# 8) INDULÁSI DIAGNOSZTIKA
+# 9) INDULÁSI DIAGNOSZTIKA
 #
 # Ebből a Render naplójában egy pillantással látszik, hogy a Gemini
 # egyáltalán be van-e kötve. Ha a kulcs hiányzik vagy a modellnév rossz,
