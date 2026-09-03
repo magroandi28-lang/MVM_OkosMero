@@ -793,7 +793,11 @@ def get_load():
         e = pd.Timestamp(_helyi_most(),tz="Europe/Budapest") + pd.Timedelta(hours=1)
         load = c.query_load("HU",start=s,end=e)
         if isinstance(load,pd.DataFrame): load = load.iloc[:,0]
-        load = load.resample('h').mean().dropna()
+                load = load.resample('h').mean()
+        # Kis lyukak kitöltése: 1–6 hiányzó órát idő szerint interpolálunk, hogy
+        # egyetlen kimaradt óra ne döntse ki az egész előrejelzést.
+        load = load.interpolate(method="time", limit=6, limit_direction="both")
+        load = load.dropna()
         load = _helyi(load)
         if len(load) < 15*24:
             print(f"[HIBA] ENTSO-E (fogyasztás): kevés adat ({len(load)} óra)", flush=True)
@@ -1487,17 +1491,7 @@ def fetch(n,_manual):
         try:
             ido_map = {r["Datum"]: r for r in ido_df.to_dict("records")}
             fc_nap = {pd.Timestamp(k): v for k,v in fcs["nap"].items()}
-            fc_szel = {pd.Timestamp(k): v for k,v in fcs["szel"].items()}
-                        # --- IDEIGLENES DIAGNOSZTIKA: miért 0 a célablak? ---
-            _kezd = load.index.max() + pd.Timedelta(hours=1)
-            _mx = lambda d: (max(d) if d else "üres")
-            print(f"[DIAG] utolso mert load ora : {load.index.max()}", flush=True)
-            print(f"[DIAG] elso josolando ora   : {_kezd}", flush=True)
-            print(f"[DIAG] dam_oras legkesobbi  : {_mx(dam_oras)} | kezd benne: {_kezd in dam_oras}", flush=True)
-            print(f"[DIAG] ido_map  legkesobbi  : {_mx(ido_map)} | kezd benne: {_kezd in ido_map}", flush=True)
-            print(f"[DIAG] fc_nap   legkesobbi  : {_mx(fc_nap)} | kezd benne: {_kezd in fc_nap}", flush=True)
-            print(f"[DIAG] fc_szel  legkesobbi  : {_mx(fc_szel)} | kezd benne: {_kezd in fc_szel}", flush=True)
-            # --- DIAGNOSZTIKA VÉGE ---
+            fc_szel = {pd.Timestamp(k): v for k,v in fcs["szel"].items()}        
             orak = celablak(load, dam_oras, ido_map, fc_nap, fc_szel)
             if len(orak) >= 6:
                 eredm = elorejelez(orak, dam_oras, ido_map, load, fc_nap, fc_szel, eur_huf)
