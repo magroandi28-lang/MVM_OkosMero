@@ -785,13 +785,7 @@ def get_dam():
         return None,False
 
 def get_load():
-    """Elmúlt 17 nap mért fogyasztása (lag336h-hoz) + legutolsó mért érték.
-
-    A modell lag-jei pontos időbélyegre néznek; egyetlen hiányzó lag-óra
-    megdönti a célablakot. Ezért TELJES ÓRÁS RÁCSRA igazítjuk a sort, és a
-    belső lyukakat KORLÁT NÉLKÜL interpoláljuk — akármilyen hosszú a kiesés,
-    a lag-pontok mindig megvannak. Hosszú lyuknál a pótolt órák becsültek
-    (a jóslat pontatlanabb, de ÉL), ezt a log ki is írja."""
+    """Elmúlt 17 nap mért fogyasztása (lag336h-hoz) + legutolsó mért érték."""
     if not ENTSOE_API_KEY: return None,False
     try:
         c = _entsoe(); ma = _ma()
@@ -807,10 +801,14 @@ def get_load():
             return None,False
 
         # Teljes, hézagmentes órás rács az első és utolsó MÉRT óra között.
+        # A modell lag-jei (24h … 336h + az előző 7 nap azonos órája) pontos
+        # időbélyegre néznek; egyetlen hiányzó lag-óra megdöntené a célablakot.
+        # A reindex a hiányzó órákat beszúrja, az interpoláció KORLÁT NÉLKÜL
+        # kitölti — akármilyen hosszú a kiesés. Hosszú lyuknál a pótolt órák
+        # becsültek (a jóslat pontatlanabb, de ÉL); ezt a log ki is írja.
         teljes = pd.date_range(load.index.min(), load.index.max(),
-                               freq='h', tz=load.index.tz)
+                               freq="h", tz=load.index.tz)
         load = load.reindex(teljes)
-        # KORLÁT NÉLKÜL: minden belső lyukat kitölt, bármilyen hosszú.
         load = load.interpolate(method="time", limit_direction="both")
         load = load.dropna()
         load = _helyi(load)
@@ -825,6 +823,26 @@ def get_load():
         return load,True
     except Exception as e:
         print(f"[HIBA] ENTSO-E (fogyasztás): {e}", flush=True)
+        return None,False
+
+def get_load_forecast():
+    """ENTSO-E/MAVIR official load forecast, normalized to local hourly timestamps."""
+    if not ENTSOE_API_KEY: return None,False
+    try:
+        c = _entsoe(); ma = _ma()
+        s = pd.Timestamp((ma-timedelta(days=1)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
+        e = pd.Timestamp((ma+timedelta(days=3)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
+        forecast = c.query_load_forecast("HU",start=s,end=e)
+        if isinstance(forecast,pd.DataFrame): forecast = forecast.iloc[:,0]
+        forecast = forecast.resample('h').mean().dropna()
+        forecast = _helyi(forecast)
+        values = _orasra(forecast)
+        if not values:
+            print("[HIBA] ENTSO-E (fogyasztasi elorejelzes): ures valasz", flush=True)
+            return None,False
+        return {t.isoformat():v for t,v in values.items()},True
+    except Exception as e:
+        print(f"[HIBA] ENTSO-E (fogyasztasi elorejelzes): {e}", flush=True)
         return None,False
 
 def get_naposzel_fc():
@@ -899,16 +917,30 @@ def celablak(load, dam_oras, ido_map, fc_nap, fc_szel):
     load_d = load.to_dict()
     kezd = utolso_mert + pd.Timedelta(hours=1)
     orak = []
+    kihagyott = 0
+    elso_hiany = None
     for i in range(24):
         dt = kezd + pd.Timedelta(hours=i)
         elozo = dt - pd.Timedelta(hours=24)
-        if dt not in dam_oras or elozo not in dam_oras: break
-        if dt not in ido_map or elozo not in ido_map: break
-        if dt not in fc_nap or elozo not in fc_nap: break
-        if dt not in fc_szel or elozo not in fc_szel: break
-        if any((dt - pd.Timedelta(hours=k)) not in load_d for k in LAGOK): break
-        if any((dt - pd.Timedelta(hours=24*k)) not in load_d for k in range(1,8)): break
+        hiany = []
+        if dt not in dam_oras or elozo not in dam_oras: hiany.append("dam")
+        if dt not in ido_map or elozo not in ido_map: hiany.append("ido")
+        if dt not in fc_nap or elozo not in fc_nap: hiany.append("fc_nap")
+        if dt not in fc_szel or elozo not in fc_szel: hiany.append("fc_szel")
+        if any((dt - pd.Timedelta(hours=k)) not in load_d for k in LAGOK): hiany.append("lag")
+        if any((dt - pd.Timedelta(hours=24*k)) not in load_d for k in range(1,8)): hiany.append("azonos_ora")
+        # FONTOS: a hiányos órát KIHAGYJUK, nem állunk meg (korábban itt `break`
+        # volt, ezért ha az ELSŐ óra bármiért hiányos volt, 0 órát adott vissza
+        # az egész — pedig a többi óra jó lett volna). Minden célóra önálló,
+        # saját lag-ekkel, ezért egy rossz óra átugorható.
+        if hiany:
+            if i == 0:
+                elso_hiany = hiany
+            kihagyott += 1
+            continue
         orak.append(dt)
+    print(f"[CELABLAK] {len(orak)} óra összeállt, {kihagyott} kihagyva"
+          + (f" | első óra hiánya: {elso_hiany}" if elso_hiany else ""), flush=True)
     return orak
 
 # ============================================================
