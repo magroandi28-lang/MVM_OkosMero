@@ -785,7 +785,13 @@ def get_dam():
         return None,False
 
 def get_load():
-    """Elmúlt 17 nap mért fogyasztása (lag336h-hoz) + legutolsó mért érték."""
+    """Elmúlt 17 nap mért fogyasztása (lag336h-hoz) + legutolsó mért érték.
+
+    A modell lag-jei (24h … 336h, plusz az előző 7 nap azonos órája) pontos
+    időbélyegre néznek. Ha az ENTSO-E bárhol kihagy néhány órát, az a lag-pont
+    hiányzik, és a célablak egyetlen órát sem tud felállítani — eddig ilyenkor
+    "dőlt meg" az egész előrejelzés. Ezért a nyers sort TELJES ÓRÁS RÁCSRA
+    igazítjuk, és a lyukakat idő szerint interpoláljuk (max 48 órás lyukig)."""
     if not ENTSOE_API_KEY: return None,False
     try:
         c = _entsoe(); ma = _ma()
@@ -793,38 +799,29 @@ def get_load():
         e = pd.Timestamp(_helyi_most(),tz="Europe/Budapest") + pd.Timedelta(hours=1)
         load = c.query_load("HU",start=s,end=e)
         if isinstance(load,pd.DataFrame): load = load.iloc[:,0]
-                load = load.resample('h').mean()
-        # Kis lyukak kitöltése: 1–6 hiányzó órát idő szerint interpolálunk, hogy
-        # egyetlen kimaradt óra ne döntse ki az egész előrejelzést.
-        load = load.interpolate(method="time", limit=6, limit_direction="both")
+        load = load.resample('h').mean()
+
+        if load.dropna().empty:
+            print("[HIBA] ENTSO-E (fogyasztás): üres válasz", flush=True)
+            return None,False
+
+        # Teljes, hézagmentes órás index a legelső és legutolsó MÉRT óra között.
+        # A reindex a hiányzó órákat NaN-ként beszúrja, az interpoláció kitölti.
+        # A `limit=48` biztonsági fék: 2 napnál hosszabb kiesést nem hidalunk át
+        # csendben — az valódi adatprobléma, azt jelezze is.
+        teljes = pd.date_range(load.index.min(), load.index.max(),
+                               freq='h', tz=load.index.tz)
+        load = load.reindex(teljes)
+        load = load.interpolate(method="time", limit=48, limit_direction="both")
         load = load.dropna()
         load = _helyi(load)
+
         if len(load) < 15*24:
             print(f"[HIBA] ENTSO-E (fogyasztás): kevés adat ({len(load)} óra)", flush=True)
             return None,False
         return load,True
     except Exception as e:
         print(f"[HIBA] ENTSO-E (fogyasztás): {e}", flush=True)
-        return None,False
-
-def get_load_forecast():
-    """ENTSO-E/MAVIR official load forecast, normalized to local hourly timestamps."""
-    if not ENTSOE_API_KEY: return None,False
-    try:
-        c = _entsoe(); ma = _ma()
-        s = pd.Timestamp((ma-timedelta(days=1)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
-        e = pd.Timestamp((ma+timedelta(days=3)).strftime("%Y-%m-%d"),tz="Europe/Budapest")
-        forecast = c.query_load_forecast("HU",start=s,end=e)
-        if isinstance(forecast,pd.DataFrame): forecast = forecast.iloc[:,0]
-        forecast = forecast.resample('h').mean().dropna()
-        forecast = _helyi(forecast)
-        values = _orasra(forecast)
-        if not values:
-            print("[HIBA] ENTSO-E (fogyasztasi elorejelzes): ures valasz", flush=True)
-            return None,False
-        return {t.isoformat():v for t,v in values.items()},True
-    except Exception as e:
-        print(f"[HIBA] ENTSO-E (fogyasztasi elorejelzes): {e}", flush=True)
         return None,False
 
 def get_naposzel_fc():
